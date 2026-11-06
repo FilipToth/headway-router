@@ -1,0 +1,9 @@
+[package]
+name = "headway-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Parses Tennessine Metro Designer SVG maps into a routable graph"
+
+[dependencies]

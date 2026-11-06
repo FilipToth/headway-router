@@ -1,0 +1,22 @@
+[package]
+name = "headway-web"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Browser front end for the Headway router"
+
+[dependencies]
+headway-core.workspace = true
+leptos = { version = "0.8", features = ["csr"] }
+console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+  "Blob",
+  "Event",
+  "EventTarget",
+  "File",
+  "FileList",
+  "HtmlInputElement",
+] }

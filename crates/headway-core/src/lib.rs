@@ -5,5 +5,7 @@
 //! for the reverse-engineered format this is built on.
 
 pub mod grid;
+pub mod svg;
 
 pub use grid::Cell;
+pub use svg::{root_inner, view_box, ViewBox};

@@ -116,7 +116,11 @@ in this map are labelled *only* with the tram icon.
    (Line 12 "Ring 1", Line 15 "Ring 2", AirTrain A, AirTrain B), plus two cases where
    the drawn subgraph is not a bare path or cycle — see gotcha 8.
 5. Line colour + overlay also give the mode (plain = metro, white overlay = tram,
-   dashed overlay = commuter rail) — a reasonable default for speed/frequency.
+   dashed overlay = commuter rail). It is the only thing in the file that speaks
+   about service at all, so `service::Services` seeds its categories from it —
+   a category per mode drawn, the commonest as the default — and the user drags
+   lines between them from there. A guess, and it has to be: the same plain
+   stroke covers a stopping metro and a high-speed one.
 
 ## 7. Gotchas to design around
 
@@ -157,7 +161,9 @@ in this map are labelled *only* with the tram icon.
    station roughly as many km out as it is drawn units out. The shape is what a
    schematic map does to distance; the size is arbitrary, and dragging it is
    the point of the settings panel.
-   Journey *times* need this plus a speed model, which is still to come.
+   Journey *times* are this plus `service::Services` (what each line is and how
+   fast it runs), put together in `timing::Timing` — which the planner then
+   searches on, so the route it picks and the time it shows come from one model.
 6. A station can be **drawn twice**, identically. Key stations by cell and merge.
 7. 52 stations carry no label and 2 are labelled only with an icon glyph. They are
    real stations and stay in the graph as interchange/through nodes; they are simply

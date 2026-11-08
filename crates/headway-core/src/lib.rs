@@ -12,7 +12,9 @@ pub mod path;
 pub mod route;
 pub mod scale;
 pub mod search;
+pub mod service;
 pub mod svg;
+pub mod timing;
 
 pub use grid::Cell;
 pub use highlight::{fade, tag, trace};
@@ -22,4 +24,6 @@ pub use path::{parse_path, polyline_length, PathError};
 pub use route::{fastest, Journey, Leg, RouteError};
 pub use scale::Scale;
 pub use search::fold;
+pub use service::{Category, Services};
 pub use svg::{parse_view_box, root_inner, root_inner_range, view_box, ViewBox};
+pub use timing::Timing;

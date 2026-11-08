@@ -344,7 +344,7 @@ mod tests {
     fn ride(net: &Network, from: &str, to: &str) -> Journey {
         let a = net.station_named(from).unwrap_or_else(|| panic!("no station {from}"));
         let b = net.station_named(to).unwrap_or_else(|| panic!("no station {to}"));
-        fastest(net, a, b).expect("the fixture stations connect")
+        fastest(&crate::Timing::fresh(net), a, b).expect("the fixture stations connect")
     }
 
     // ------------------------------------------------------------ the fade

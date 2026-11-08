@@ -1,23 +1,19 @@
-//! A first journey planner over the parsed graph.
+//! The journey planner.
 //!
-//! Provisional by design: there are no timetables, acceleration curves or
-//! station-spacing effects yet, so "fastest" means the least drawn track plus
-//! flat penalties for stopping and for changing lines. Grid units stand in for
-//! minutes. When the real time model arrives only [`cost_of`] needs to change —
-//! the search itself is already shaped for it.
+//! "Fastest" means fastest: the search runs on the seconds that
+//! [`Timing`] gives it — real distances through the user's scale, ridden at
+//! the speed and acceleration of each line's service category, plus a stand at
+//! every stop and a penalty for every change. What the planner minimises and
+//! what the app displays are the same number, worked out in one place.
+//!
+//! What is still missing lives in [`crate::timing`]: frequencies, and anything
+//! that varies by time of day.
 
 use crate::network::{EdgeId, LineId, Network, StationId};
+use crate::timing::Timing;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
-
-/// Charged once per stop reached, standing in for braking, dwelling and
-/// accelerating away again.
-pub const DWELL: f64 = 0.6;
-/// Charged for changing lines: walking the interchange and waiting for the
-/// next service. Deliberately heavy, since a change costs a passenger far more
-/// than the ~3 grid units of a typical hop.
-pub const TRANSFER: f64 = 8.0;
 
 /// One continuous ride on a single line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,8 +98,9 @@ impl Leg {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Journey {
     pub legs: Vec<Leg>,
-    /// In the notional units described above, not minutes.
-    pub cost: f64,
+    /// Seconds from boarding the first service to stepping off the last: the
+    /// number the search minimised, and the one to show.
+    pub seconds: f64,
 }
 
 impl Journey {
@@ -144,21 +141,16 @@ impl fmt::Display for RouteError {
 
 impl std::error::Error for RouteError {}
 
-/// What riding `edge` costs, having arrived on `arrived_on`.
-fn cost_of(net: &Network, edge: EdgeId, arrived_on: Option<LineId>) -> f64 {
-    let e = net.edge(edge);
-    let change = matches!(arrived_on, Some(line) if line != e.line);
-    e.length + DWELL + if change { TRANSFER } else { 0.0 }
-}
-
-/// The cheapest journey between two stations, over routable lines only.
+/// The quickest journey between two stations, over routable lines only.
 ///
 /// The search runs over (station, line aboard) rather than plain stations, so
-/// that staying put on a line can be preferred to changing at the same spot.
-pub fn fastest(net: &Network, from: StationId, to: StationId) -> Result<Journey, RouteError> {
+/// that staying put on a line can be preferred to changing at the same spot —
+/// which is the whole reason a change can cost more than the ride it saves.
+pub fn fastest(timing: &Timing, from: StationId, to: StationId) -> Result<Journey, RouteError> {
     if from == to {
         return Err(RouteError::SameStation);
     }
+    let net = timing.net();
 
     type State = (StationId, LineId);
     let mut best: BTreeMap<State, f64> = BTreeMap::new();
@@ -167,7 +159,7 @@ pub fn fastest(net: &Network, from: StationId, to: StationId) -> Result<Journey,
 
     for (next, edge) in net.neighbours(from) {
         let state = (next, edge.line);
-        let cost = cost_of(net, edge.id, None);
+        let cost = timing.step(edge.id, None);
         if best.get(&state).is_none_or(|had| cost < *had) {
             best.insert(state, cost);
             came.insert(state, (from, None, edge.id));
@@ -187,7 +179,7 @@ pub fn fastest(net: &Network, from: StationId, to: StationId) -> Result<Journey,
         let (at, aboard) = state;
         for (next, edge) in net.neighbours(at) {
             let onward = (next, edge.line);
-            let total = cost + cost_of(net, edge.id, Some(aboard));
+            let total = cost + timing.step(edge.id, Some(aboard));
             if best.get(&onward).is_none_or(|had| total < *had) {
                 best.insert(onward, total);
                 came.insert(onward, (at, Some(aboard), edge.id));
@@ -196,7 +188,7 @@ pub fn fastest(net: &Network, from: StationId, to: StationId) -> Result<Journey,
         }
     }
 
-    let (mut state, cost) = arrival.ok_or(RouteError::Unreachable)?;
+    let (mut state, seconds) = arrival.ok_or(RouteError::Unreachable)?;
 
     // Walk the predecessors back to the origin, then ride forwards again.
     let mut ridden = Vec::new();
@@ -225,7 +217,7 @@ pub fn fastest(net: &Network, from: StationId, to: StationId) -> Result<Journey,
         at = next;
     }
 
-    Ok(Journey { legs, cost })
+    Ok(Journey { legs, seconds })
 }
 
 /// f64 ordered for the heap. Costs here are always finite.
@@ -247,6 +239,7 @@ impl PartialOrd for Cost {
 mod tests {
     use super::*;
     use crate::parse;
+    use crate::timing::Timing;
 
     /// Two lines crossing at Quay, plus a long way round that the planner
     /// should reject even though it needs no change.
@@ -305,6 +298,12 @@ mod tests {
         parse(MAP).expect("fixture parses")
     }
 
+    /// The fixture timed as a fresh map is: default scale, categories seeded
+    /// from the drawing.
+    fn timed(net: &Network) -> Timing<'_> {
+        Timing::fresh(net)
+    }
+
     fn at(net: &Network, name: &str) -> StationId {
         *net.search_index().get(name).unwrap_or_else(|| panic!("no station {name}")).first().unwrap()
     }
@@ -323,7 +322,7 @@ mod tests {
     #[test]
     fn a_single_line_journey_has_one_leg_and_no_transfer() {
         let net = net();
-        let j = fastest(&net, at(&net, "Pier"), at(&net, "Ridge")).unwrap();
+        let j = fastest(&timed(&net), at(&net, "Pier"), at(&net, "Ridge")).unwrap();
         assert_eq!(described(&net, &j), ["North 2"]);
         assert_eq!(j.transfers(), 0);
         assert_eq!(j.stations(), 2);
@@ -333,7 +332,7 @@ mod tests {
     #[test]
     fn changing_lines_is_reported_at_the_right_station() {
         let net = net();
-        let j = fastest(&net, at(&net, "Pier"), at(&net, "Union")).unwrap();
+        let j = fastest(&timed(&net), at(&net, "Pier"), at(&net, "Union")).unwrap();
         assert_eq!(described(&net, &j), ["North 1", "transfer at Quay", "East 2"]);
         assert_eq!(j.transfers(), 1);
         assert_eq!(j.stations(), 3);
@@ -343,13 +342,13 @@ mod tests {
     #[test]
     fn a_change_beats_a_much_longer_one_seat_ride() {
         let net = net();
-        let j = fastest(&net, at(&net, "Pier"), at(&net, "Union")).unwrap();
+        let j = fastest(&timed(&net), at(&net, "Pier"), at(&net, "Union")).unwrap();
         // Scenic runs Pier -> Cape -> Union with no change at all, but ~20 units
         assert!(
             j.legs.iter().all(|l| net.line(l.line).name != "Scenic"),
             "took the scenic route: {:?}", described(&net, &j),
         );
-        assert!(j.cost < 20.0, "cost {} should beat the ~21 unit scenic ride", j.cost);
+        assert!(j.seconds > 0.0 && j.seconds < 3_600.0, "{} s is not a sane time", j.seconds);
     }
 
     #[test]
@@ -357,23 +356,28 @@ mod tests {
         let net = net();
         // Pier -> Cape is Scenic all the way; going North then East then Scenic
         // back out would be absurd, and the transfer charge guarantees it loses
-        let j = fastest(&net, at(&net, "Pier"), at(&net, "Cape")).unwrap();
+        let j = fastest(&timed(&net), at(&net, "Pier"), at(&net, "Cape")).unwrap();
         assert_eq!(described(&net, &j), ["Scenic 1"]);
     }
 
     #[test]
     fn journeys_are_symmetric() {
         let net = net();
-        let there = fastest(&net, at(&net, "Pier"), at(&net, "Union")).unwrap();
-        let back = fastest(&net, at(&net, "Union"), at(&net, "Pier")).unwrap();
-        assert!((there.cost - back.cost).abs() < 1e-9, "{} vs {}", there.cost, back.cost);
+        let there = fastest(&timed(&net), at(&net, "Pier"), at(&net, "Union")).unwrap();
+        let back = fastest(&timed(&net), at(&net, "Union"), at(&net, "Pier")).unwrap();
+        assert!(
+            (there.seconds - back.seconds).abs() < 1e-9,
+            "{} s out, {} s back",
+            there.seconds,
+            back.seconds,
+        );
         assert_eq!(there.transfers(), back.transfers());
     }
 
     #[test]
     fn legs_join_end_to_end() {
         let net = net();
-        let j = fastest(&net, at(&net, "Ridge"), at(&net, "Union")).unwrap();
+        let j = fastest(&timed(&net), at(&net, "Ridge"), at(&net, "Union")).unwrap();
         assert_eq!(j.legs[0].board(), at(&net, "Ridge"));
         assert_eq!(j.legs[j.legs.len() - 1].alight(), at(&net, "Union"));
         for pair in j.legs.windows(2) {
@@ -390,7 +394,7 @@ mod tests {
     #[test]
     fn a_leg_breaks_into_the_stretches_it_is_joined_from() {
         let net = net();
-        let j = fastest(&net, at(&net, "Pier"), at(&net, "Union")).unwrap();
+        let j = fastest(&timed(&net), at(&net, "Pier"), at(&net, "Union")).unwrap();
         for leg in &j.legs {
             let stretches = leg.segments(&net);
             assert_eq!(stretches.len(), leg.edges.len(), "one per segment ridden");
@@ -416,9 +420,9 @@ mod tests {
     fn says_so_when_there_is_no_route() {
         let net = net();
         let pier = at(&net, "Pier");
-        assert_eq!(fastest(&net, pier, pier), Err(RouteError::SameStation));
+        assert_eq!(fastest(&timed(&net), pier, pier), Err(RouteError::SameStation));
         // Orphan is a perfectly good line, just not joined to anything
-        assert_eq!(fastest(&net, pier, at(&net, "Islet")), Err(RouteError::Unreachable));
-        assert!(fastest(&net, at(&net, "Islet"), at(&net, "Jetty")).is_ok());
+        assert_eq!(fastest(&timed(&net), pier, at(&net, "Islet")), Err(RouteError::Unreachable));
+        assert!(fastest(&timed(&net), at(&net, "Islet"), at(&net, "Jetty")).is_ok());
     }
 }

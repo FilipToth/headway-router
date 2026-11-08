@@ -3,9 +3,12 @@
 //!     headway <map.svg> [--lines] [--stations] [--warnings] [--line <name>]
 //!                       [--route <from> <to>] [--find <query>] [--paint]
 //!                       [--profile <units>:<km>,...] [--centre <x>,<y>]
+//!                       [--headway <minutes>] [--walk <seconds>]
 
 use headway_core::network::{Marker, Shape};
-use headway_core::{fade, fastest, parse, tag, trace, Network, Scale, StationId};
+use headway_core::{
+    fade, fastest, parse, tag, trace, Network, Scale, Services, StationId, Timing,
+};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -14,7 +17,7 @@ fn main() -> ExitCode {
         eprintln!(
             "usage: headway <map.svg> [--lines] [--stations] [--warnings] [--line <name>] \
              [--route <from> <to>] [--find <query>] [--paint] \
-             [--profile <units>:<km>,...] [--centre <x>,<y>]"
+             [--profile <units>:<km>,...] [--centre <x>,<y>] [--headway <minutes>] [--walk <seconds>]"
         );
         return ExitCode::from(2);
     }
@@ -60,7 +63,10 @@ fn main() -> ExitCode {
             eprintln!("--route needs two station names");
             return ExitCode::from(2);
         };
-        return route(&net, from, to, want("--paint"), &scale(&net, &args));
+        let measure = scale(&net, &args);
+        let services = seeded(&net, &args);
+        let timing = Timing::new(&net, &measure, &services);
+        return route(&timing, &measure, &services, from, to, want("--paint"));
     }
 
     summary(&net, path);
@@ -110,6 +116,39 @@ fn scale(net: &Network, args: &[String]) -> Scale {
     Scale::from_points(base.centre, points)
 }
 
+/// The map's service categories, with `--headway 12` putting every one of
+/// them on a twelve minute service and `--walk 90` lengthening the change —
+/// enough to see what frequency does to a route without a browser.
+fn seeded(net: &Network, args: &[String]) -> Services {
+    let mut services = Services::for_network(net);
+    let number = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .and_then(|raw| raw.parse::<f64>().ok())
+    };
+    if let Some(minutes) = number("--headway") {
+        for at in 0..services.categories().len() {
+            services.set_headway(at, minutes);
+        }
+    }
+    if let Some(seconds) = number("--walk") {
+        services.set_walk(seconds);
+    }
+    services
+}
+
+/// How often a service runs, said as the route display says it.
+fn every(minutes: f64) -> String {
+    let seconds = (minutes.max(0.0) * 60.0).round() as u64;
+    match seconds {
+        60 => "every minute".to_string(),
+        0..=119 => format!("every {seconds} seconds"),
+        s if s % 60 == 0 => format!("every {} min", s / 60),
+        s => format!("every {:.1} min", s as f64 / 60.0),
+    }
+}
+
 fn summary(net: &Network, path: &str) {
     let vb = net.view_box;
     let routable: Vec<_> = net.routable_lines().collect();
@@ -151,6 +190,18 @@ fn summary(net: &Network, path: &str) {
         "  scale          centre ({}, {}), profile out to {} units",
         scale.centre.0, scale.centre.1, scale.reach(),
     );
+
+    // What the service panel opens with, since it is seeded from the drawing.
+    let services = Services::for_network(net);
+    let sorted: Vec<String> = services
+        .categories()
+        .iter()
+        .enumerate()
+        .map(|(at, c)| {
+            format!("{} {} ({:.0} km/h)", c.name, services.lines_in(at).len(), c.top_speed)
+        })
+        .collect();
+    println!("  services       {}", sorted.join(", "));
 }
 
 fn lines(net: &Network, only: Option<&str>) {
@@ -263,7 +314,21 @@ fn find(net: &Network, needle: &str) -> Result<StationId, String> {
     }
 }
 
-fn route(net: &Network, from: &str, to: &str, paint: bool, scale: &Scale) -> ExitCode {
+/// A duration as a timetable prints it.
+fn clock(seconds: f64) -> String {
+    let whole = seconds.max(0.0).round() as u64;
+    format!("{}:{:02}", whole / 60, whole % 60)
+}
+
+fn route(
+    timing: &Timing,
+    scale: &Scale,
+    services: &Services,
+    from: &str,
+    to: &str,
+    paint: bool,
+) -> ExitCode {
+    let net = timing.net();
     let (from, to) = match (find(net, from), find(net, to)) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => {
@@ -272,19 +337,19 @@ fn route(net: &Network, from: &str, to: &str, paint: bool, scale: &Scale) -> Exi
         }
     };
     println!("{}  ->  {}", net.label(from), net.label(to));
-    match fastest(net, from, to) {
+    match fastest(timing, from, to) {
         Err(why) => {
             println!("  {why}");
             ExitCode::FAILURE
         }
         Ok(journey) => {
             println!(
-                "  {} stations, {} transfer(s), {:.1} units of track, {:.1} km, cost {:.1}",
+                "  {} stations, {} transfer(s), {:.1} units of track, {:.1} km, {}",
                 journey.stations(),
                 journey.transfers(),
                 journey.distance(net),
                 scale.journey_km(net, &journey),
-                journey.cost,
+                clock(journey.seconds),
             );
             println!(
                 "  measured from ({}, {}) at {:.2} km/unit in the centre, {:.2} at the edge",
@@ -293,17 +358,31 @@ fn route(net: &Network, from: &str, to: &str, paint: bool, scale: &Scale) -> Exi
                 scale.km_per_unit(0.0),
                 scale.km_per_unit(scale.reach()),
             );
+            println!(
+                "  {} s stood at each stop; a change is {} across the platform \
+                 plus half the headway of whatever is boarded",
+                timing.dwell,
+                clock(timing.walk),
+            );
             println!();
             for (i, leg) in journey.legs.iter().enumerate() {
                 println!(
-                    "    {:<30}{:>3} station{}{:>9.1} km",
-                    net.line(leg.line).name,
+                    "    {:<30}{:>3} station{}{:>9.1} km{:>8}  {}",
+                    truncate(&net.line(leg.line).name, 29),
                     leg.stations(),
                     if leg.stations() == 1 { "" } else { "s" },
                     scale.leg_km(net, leg),
+                    clock(timing.leg(leg)),
+                    every(services.headway_of(leg.line)),
                 );
-                if i + 1 < journey.legs.len() {
-                    println!("    transfer at {}", net.label(leg.alight()));
+                if let Some(next) = journey.legs.get(i + 1) {
+                    println!(
+                        "    transfer at {:<26}{} walk + {} wait{:>8}",
+                        truncate(&net.label(leg.alight()), 25),
+                        clock(timing.walk),
+                        clock(timing.wait(next.line)),
+                        clock(timing.boarding(next.line)),
+                    );
                 }
             }
             if paint {

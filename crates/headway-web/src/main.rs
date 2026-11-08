@@ -1,8 +1,11 @@
-use headway_core::{
-    fade, fastest, parse, root_inner_range, tag, trace, Journey, Network, Scale, StationId,
-    ViewBox,
+use headway_core::service::{
+    MAX_HEADWAY, MAX_RATE, MAX_SPEED, MAX_WALK, MIN_HEADWAY, MIN_RATE, MIN_SPEED,
 };
-use leptos::ev::{KeyboardEvent, MouseEvent, PointerEvent, WheelEvent};
+use headway_core::{
+    fade, fastest, parse, root_inner_range, tag, trace, Category, LineId, Network, Scale, Services,
+    StationId, Timing, ViewBox,
+};
+use leptos::ev::{DragEvent, KeyboardEvent, MouseEvent, PointerEvent, WheelEvent};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::sync::Arc;
@@ -95,11 +98,17 @@ enum Row {
         line: String,
         colour: String,
         stations: usize,
-        /// Which leg of the journey this row is, so its distance can be looked
-        /// up without rebuilding the row when the scale changes.
-        leg: usize,
+        km: f64,
+        seconds: f64,
+        /// How often this line runs.
+        every: String,
     },
-    Transfer { at: String },
+    Transfer {
+        at: String,
+        seconds: f64,
+        /// The walk and the wait, which is what the total is made of.
+        detail: String,
+    },
 }
 
 #[derive(Clone, PartialEq)]
@@ -107,22 +116,14 @@ struct Plan {
     rows: Vec<Row>,
     stations: usize,
     transfers: usize,
+    km: f64,
+    seconds: f64,
     /// Rules that fade the whole network to a pale diagram.
     css: String,
     /// The journey itself, drawn bold over that diagram.
     trace: String,
-    /// The route as planned, kept so that a change of scale can re-measure the
-    /// ride — whole, per leg, or per stretch of track — without planning it
-    /// again. Only ids, so it is cheap to hold and to compare.
-    journey: Journey,
-}
-
-/// How long a journey is under the current scale.
-#[derive(Clone, PartialEq)]
-struct Measure {
-    total: f64,
-    /// One per leg, in the order they are ridden.
-    legs: Vec<f64>,
+    /// A distance beside every stretch of track, for the debug toggle.
+    tags: String,
 }
 
 fn window_size() -> (f64, f64) {
@@ -346,7 +347,7 @@ fn ScalePanel(
     net: Arc<Network>,
     scale: RwSignal<Scale>,
     y_max: RwSignal<f64>,
-    open: RwSignal<bool>,
+    panel: RwSignal<Option<Panel>>,
     /// Writes each leg's distance onto the map beside the leg.
     debug: RwSignal<bool>,
 ) -> impl IntoView {
@@ -447,7 +448,7 @@ fn ScalePanel(
         <div class="panel">
             <div class="panel-head">
                 <span class="panel-title">"Distance"</span>
-                <button class="btn btn-quiet" on:click=move |_| open.set(false)>"Done"</button>
+                <button class="btn btn-quiet" on:click=move |_| panel.set(None)>"Done"</button>
             </div>
 
             <p class="panel-note">
@@ -591,6 +592,343 @@ fn ScalePanel(
     }
 }
 
+/// Which settings panel is open, if any. One at a time: they share the corner,
+/// and the map has to stay visible behind whichever it is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    Scale,
+    Service,
+}
+
+/// A journey as a transit app gives it: minutes, because nobody plans around
+/// the seconds.
+fn mins_text(s: f64) -> String {
+    let mins = (s.max(0.0) / 60.0).round() as u64;
+    match mins {
+        0 => "under a minute".to_string(),
+        1..=59 => format!("{mins} min"),
+        _ => format!("{} h {:02} min", mins / 60, mins % 60),
+    }
+}
+
+/// How often a service runs, said the way a timetable says it: a two-minute
+/// headway is "every 90 seconds" territory, not "every 1.5 min".
+fn every_text(minutes: f64) -> String {
+    let seconds = (minutes.max(0.0) * 60.0).round() as u64;
+    match seconds {
+        60 => "every minute".to_string(),
+        0..=119 => format!("every {seconds} seconds"),
+        s if s % 60 == 0 => format!("every {} min", s / 60),
+        s => format!("every {:.1} min", s as f64 / 60.0),
+    }
+}
+
+/// A duration as a timetable would print it.
+///
+/// Rounded to whole seconds *before* being split, or 119.7 s prints as 1:60.
+fn secs_text(s: f64) -> String {
+    let whole = s.max(0.0).round() as u64;
+    match whole < 60 {
+        true => format!("{whole} s"),
+        false => format!("{}:{:02}", whole / 60, whole % 60),
+    }
+}
+
+/// Enough hues that two categories never read as one, wrapping rather than
+/// running out. Only a label: a category has no colour of its own, its lines
+/// keep theirs.
+fn category_hue(at: usize) -> String {
+    const HUES: [u16; 6] = [214, 152, 28, 330, 268, 86];
+    format!("hsl({}, 62%, 46%)", HUES[at % HUES.len()])
+}
+
+/// Service categories: what kind of thing each line is, and how fast that kind
+/// of thing goes.
+///
+/// Seeded from how the map draws its lines, so most maps open already sorted
+/// and the dragging is for the cases the drawing cannot express — a high-speed
+/// metro drawn like every other metro, say.
+#[component]
+fn ServicePanel(
+    net: Arc<Network>,
+    services: RwSignal<Services>,
+    panel: RwSignal<Option<Panel>>,
+) -> impl IntoView {
+    // The line being dragged, and the category the pointer is over.
+    let held = RwSignal::new(None::<LineId>);
+    let over = RwSignal::new(None::<usize>);
+    // Tapped rather than dragged: the same move in two gestures, because
+    // HTML's drag and drop does not exist on a touch screen.
+    let picked = RwSignal::new(None::<LineId>);
+
+    // A click inside the head or the numbers is editing, not placing.
+    let stop = |ev: MouseEvent| ev.stop_propagation();
+
+    // The list is built from the *shape* of the sorting — which lines are
+    // where — and not from the names and speeds in it. Those are read field by
+    // field below. Otherwise a keystroke in a name would rebuild the list, and
+    // the field would be destroyed under the cursor it is being typed into.
+    let grouped = Memo::new(move |_| {
+        let sorted = services.get();
+        (0..sorted.categories().len()).map(|at| sorted.lines_in(at)).collect::<Vec<_>>()
+    });
+
+    view! {
+        <div class="panel">
+            <div class="panel-head">
+                <span class="panel-title">"Service"</span>
+                <button class="btn btn-quiet" on:click=move |_| panel.set(None)>"Done"</button>
+            </div>
+
+            <p class="panel-note">
+                "Every line runs at the speed of the category it is in, and as often as \
+                 it says beside its name. Categories start from the way the map draws its \
+                 lines, which is all the file says about service. Drag a line onto another \
+                 category — or tap the line, then tap the category."
+            </p>
+
+            {move || grouped.get().into_iter().enumerate().map(|(at, ids)| {
+                let lines: Vec<(LineId, String, String)> = ids
+                    .into_iter()
+                    .map(|id| {
+                        let line = net.line(id);
+                        (id, line.name.clone(), line.colour.clone())
+                    })
+                    .collect();
+                let empty = lines.is_empty();
+
+                // Each reads only its own corner of the category, so only it
+                // is touched when that corner changes.
+                let of = move |pick: fn(&Category) -> f64| {
+                    services.with(|s| s.categories().get(at).map_or(0.0, pick))
+                };
+                let name = move || {
+                    services.with(|s| {
+                        s.categories().get(at).map_or(String::new(), |c| c.name.clone())
+                    })
+                };
+                let reach = move || {
+                    services.with(|s| {
+                        s.categories().get(at).map_or(String::new(), |c| {
+                            format!(
+                                "Reaches {:.0} km/h in {}, {}. A 1 km hop takes {}, \
+                                 and changing onto one costs {} on average.",
+                                c.top_speed,
+                                km_text(c.distance_to_top() / 1000.0),
+                                secs_text(c.time_to_top()),
+                                secs_text(c.run_time(1.0)),
+                                secs_text(c.headway * 60.0 / 2.0),
+                            )
+                        })
+                    })
+                };
+
+                view! {
+                    <div class="cat" class:over=move || over.get() == Some(at)
+                         on:dragover=move |ev: DragEvent| {
+                             // Without this the browser refuses the drop.
+                             ev.prevent_default();
+                             over.set(Some(at));
+                         }
+                         on:dragleave=move |_| if over.get() == Some(at) { over.set(None) }
+                         on:drop=move |ev: DragEvent| {
+                             ev.prevent_default();
+                             // Our own signal normally, but read back out of
+                             // the drag itself if it started somewhere else.
+                             let moved = held.get().or_else(|| {
+                                 ev.data_transfer()
+                                     .and_then(|data| data.get_data("text/plain").ok())
+                                     .and_then(|raw| raw.parse::<usize>().ok())
+                                     .map(LineId)
+                             });
+                             if let Some(line) = moved {
+                                 services.update(|s| s.assign(line, at));
+                             }
+                             held.set(None);
+                             over.set(None);
+                             picked.set(None);
+                         }
+                         on:click=move |_| if let Some(line) = picked.get() {
+                             services.update(|s| s.assign(line, at));
+                             picked.set(None);
+                         }>
+
+                        <div class="cat-head" on:click=stop>
+                            <span class="cat-dot"
+                                  style=format!("background:{}", category_hue(at))></span>
+                            <input class="cat-name" type="text" placeholder="Category"
+                                   aria-label="Category name"
+                                   prop:value=name
+                                   on:input=move |ev| services.update(|s| {
+                                       s.rename(at, &event_target_value(&ev))
+                                   }) />
+                            {(at == 0).then(|| view! { <span class="badge">"default"</span> })}
+                            {(at > 0).then(|| view! {
+                                <button class="btn btn-quiet"
+                                        title="Remove, sending its lines back to the default"
+                                        on:click=move |_| services.update(|s| s.remove(at))>
+                                    "\u{00d7}"
+                                </button>
+                            })}
+                        </div>
+
+                        <div class="nums" on:click=stop>
+                            <label>"Top km/h"
+                                <input class="num" type="number" step="5"
+                                       min=MIN_SPEED.to_string() max=MAX_SPEED.to_string()
+                                       prop:value=move || of(|c| c.top_speed)
+                                       on:change=move |ev| {
+                                           if let Ok(v) = event_target_value(&ev).parse() {
+                                               services.update(|s| s.set_top_speed(at, v));
+                                           }
+                                       } />
+                            </label>
+                            <label>"Every min"
+                                    <input class="num" type="number" step="0.5"
+                                           min=MIN_HEADWAY.to_string()
+                                           max=MAX_HEADWAY.to_string()
+                                           title="Minutes between services. A passenger who \
+                                                  turns up unannounced waits half of it."
+                                           prop:value=move || of(|c| c.headway)
+                                           on:change=move |ev| {
+                                               if let Ok(v) = event_target_value(&ev).parse() {
+                                                   services.update(|s| s.set_headway(at, v));
+                                               }
+                                           } />
+                                </label>
+                            <label>"Accel m/s²"
+                                <input class="num" type="number" step="0.1"
+                                       min=MIN_RATE.to_string() max=MAX_RATE.to_string()
+                                       prop:value=move || of(|c| c.accel)
+                                       on:change=move |ev| {
+                                           if let Ok(v) = event_target_value(&ev).parse() {
+                                               services.update(|s| s.set_accel(at, v));
+                                           }
+                                       } />
+                            </label>
+                            <label>"Brake m/s²"
+                                <input class="num" type="number" step="0.1"
+                                       min=MIN_RATE.to_string() max=MAX_RATE.to_string()
+                                       prop:value=move || of(|c| c.brake)
+                                       on:change=move |ev| {
+                                           if let Ok(v) = event_target_value(&ev).parse() {
+                                               services.update(|s| s.set_brake(at, v));
+                                           }
+                                       } />
+                            </label>
+                        </div>
+
+                        <p class="cat-note">{reach}</p>
+
+                        <div class="zone">
+                            {lines.into_iter().map(|(id, line, colour)| {
+                                let shown = line.clone();
+                                let wait = format!(
+                                    "How often {line} runs, in minutes. Empty follows the \
+                                     category; a passenger changing onto it waits half of it.",
+                                );
+                                view! {
+                                    <span class="line-chip" title=line
+                                          class:picked=move || picked.get() == Some(id)>
+                                        // Only the name drags. An input inside
+                                        // a draggable element is a fight to
+                                        // click into, so the handle is the
+                                        // part that is not an input.
+                                        <span class="chip-grab" draggable="true"
+                                              on:dragstart=move |ev: DragEvent| {
+                                                  held.set(Some(id));
+                                                  if let Some(data) = ev.data_transfer() {
+                                                      // Firefox will not start
+                                                      // a drag carrying nothing.
+                                                      let _ = data.set_data(
+                                                          "text/plain", &id.0.to_string(),
+                                                      );
+                                                      data.set_effect_allowed("move");
+                                                  }
+                                              }
+                                              on:dragend=move |_| {
+                                                  held.set(None);
+                                                  over.set(None);
+                                              }
+                                              on:click=move |ev: MouseEvent| {
+                                                  ev.stop_propagation();
+                                                  picked.update(|p| {
+                                                      *p = (*p != Some(id)).then_some(id)
+                                                  });
+                                              }>
+                                            <span class="chip-swatch"
+                                                  style=format!("background:{colour}")></span>
+                                            {shown}
+                                        </span>
+                                        <input class="freq" type="number" step="0.5"
+                                               min=MIN_HEADWAY.to_string()
+                                               max=MAX_HEADWAY.to_string()
+                                               title=wait aria-label="Minutes between services"
+                                               placeholder=move || {
+                                                   services.with(|s| s.headway_of(id).to_string())
+                                               }
+                                               prop:value=move || {
+                                                   services.with(|s| {
+                                                       s.own_headway(id)
+                                                           .map(|m| m.to_string())
+                                                           .unwrap_or_default()
+                                                   })
+                                               }
+                                               on:click=stop
+                                               on:change=move |ev| {
+                                                   let raw = event_target_value(&ev);
+                                                   let typed = raw.trim();
+                                                   if typed.is_empty() {
+                                                       services.update(|s| {
+                                                           s.set_own_headway(id, None)
+                                                       });
+                                                   } else if let Ok(v) = typed.parse() {
+                                                       services.update(|s| {
+                                                           s.set_own_headway(id, Some(v))
+                                                       });
+                                                   }
+                                               } />
+                                    </span>
+                                }
+                            }).collect_view()}
+                            {empty.then(|| view! {
+                                <span class="zone-empty">"drop a line here"</span>
+                            })}
+                        </div>
+                    </div>
+                }
+            }).collect_view()}
+
+            <button class="btn btn-quiet add"
+                    on:click=move |_| services.update(|s| { s.add("New category"); })>
+                "+ Add category"
+            </button>
+
+            <div class="rule"></div>
+            <div class="row">
+                <span class="row-label">"Interchange"</span>
+                <input class="num walk" type="number" step="15" min="0"
+                       max=MAX_WALK.to_string()
+                       aria-label="Seconds walking at a change"
+                       prop:value=move || services.with(Services::walk)
+                       on:change=move |ev| {
+                           if let Ok(v) = event_target_value(&ev).parse() {
+                               services.update(|s| s.set_walk(v));
+                           }
+                       } />
+                <span class="row-unit">"seconds of walking at every change"</span>
+            </div>
+
+            <p class="panel-note">
+                "A change costs that walk and then half the headway of whatever is \
+                 boarded, which is the average wait for turning up unannounced. Waiting \
+                 for the very first service is not counted: that is what a departure \
+                 board is for."
+            </p>
+        </div>
+    }
+}
+
 #[component]
 fn App() -> impl IntoView {
     let doc = RwSignal::new(None::<MapDoc>);
@@ -607,97 +945,82 @@ fn App() -> impl IntoView {
     // The graph's kilometre axis, which is a view of the profile rather than
     // part of it, so it lives here and not in the `Scale`.
     let y_max = RwSignal::new(10.0);
-    let settings = RwSignal::new(false);
+    let services = RwSignal::new(Services::default());
+    let panel = RwSignal::new(None::<Panel>);
+    // Opening one panel closes the other; pressing the open one closes it.
+    let toggle = move |which: Panel| panel.update(|at| *at = (*at != Some(which)).then_some(which));
     // True while the centre crosshair is being dragged across the map.
     let moving_centre = RwSignal::new(false);
     // Set from the panel; stays on when the panel closes, which is the point
     // of it — the tags are for reading the map, not the panel.
     let debug = RwSignal::new(false);
 
-    // Re-planned whenever either end changes.
+    // Re-planned whenever either end moves — and whenever the scale or the
+    // service categories change, because the quickest route is now a question
+    // about seconds, and both of those are part of the answer.
     let plan = Memo::new(move |_| -> Option<Result<Plan, String>> {
         let (Some(from), Some(to)) = (origin.get(), destination.get()) else {
             return None;
         };
+        let (measure, sorted) = (scale.get(), services.get());
         doc.with(|held| {
             let net = &held.as_ref()?.net;
-            Some(match fastest(net, from, to) {
+            let timing = Timing::new(net, &measure, &sorted);
+            Some(match fastest(&timing, from, to) {
                 Err(why) => Err(why.to_string()),
                 Ok(journey) => {
                     let mut rows = Vec::new();
+                    let (mut hops, mut texts) = (Vec::new(), Vec::new());
                     for (i, leg) in journey.legs.iter().enumerate() {
                         let line = net.line(leg.line);
                         rows.push(Row::Ride {
                             line: line.name.clone(),
                             colour: line.colour.clone(),
                             stations: leg.stations(),
-                            leg: i,
+                            km: measure.leg_km(net, leg),
+                            seconds: timing.leg(leg),
+                            every: every_text(sorted.headway_of(leg.line)),
                         });
-                        if i + 1 < journey.legs.len() {
-                            rows.push(Row::Transfer { at: net.label(leg.alight()) });
+                        if let Some(next) = journey.legs.get(i + 1) {
+                            let wait = secs_text(timing.wait(next.line));
+                            rows.push(Row::Transfer {
+                                at: net.label(leg.alight()),
+                                seconds: timing.boarding(next.line),
+                                detail: match timing.walk > 0.0 {
+                                    true => format!("{} walk · {wait} wait", secs_text(timing.walk)),
+                                    false => format!("{wait} wait"),
+                                },
+                            });
+                        }
+                        // Measured stretch by stretch rather than split out of
+                        // the leg, because each label states its own track.
+                        for hop in leg.segments(net) {
+                            texts.push(km_text(measure.length(&hop)));
+                            hops.push(hop);
                         }
                     }
                     Ok(Plan {
                         rows,
                         stations: journey.stations(),
                         transfers: journey.transfers(),
+                        km: measure.journey_km(net, &journey),
+                        seconds: journey.seconds,
                         css: fade(net),
                         trace: trace(net, &journey),
-                        journey,
+                        tags: tag(&hops, &texts),
                     })
                 }
             })
         })
     });
 
-    // Deliberately a second pass over the planned journey rather than part of
-    // the plan: dragging the centre changes every distance on screen, and
-    // re-planning the route on every pointer move to find that out would
-    // rebuild the fade stylesheet and the route layer sixty times a second.
-    let measure = Memo::new(move |_| -> Option<Measure> {
-        let s = scale.get();
-        doc.with(|held| {
-            let net = &held.as_ref()?.net;
-            plan.with(|outcome| {
-                let Some(Ok(p)) = outcome.as_ref() else {
-                    return None;
-                };
-                let legs: Vec<f64> =
-                    p.journey.legs.iter().map(|leg| s.leg_km(net, leg)).collect();
-                Some(Measure { total: legs.iter().sum(), legs })
-            })
-        })
-    });
-
-    // A distance written beside every stretch of track between two stations.
-    // Empty unless the debug toggle is on, so the layer costs nothing the rest
-    // of the time.
-    let tags = move || {
-        if !debug.get() {
-            return String::new();
-        }
-        let s = scale.get();
-        doc.with(|held| {
-            let Some(net) = held.as_ref().map(|d| &d.net) else {
-                return String::new();
-            };
-            plan.with(|outcome| {
-                let Some(Ok(p)) = outcome.as_ref() else {
-                    return String::new();
-                };
-                // Measured stretch by stretch rather than split out of the leg
-                // totals, because each label states what its own track costs.
-                let mut hops = Vec::new();
-                let mut texts = Vec::new();
-                for leg in &p.journey.legs {
-                    for hop in leg.segments(net) {
-                        texts.push(km_text(s.length(&hop)));
-                        hops.push(hop);
-                    }
-                }
-                tag(&hops, &texts)
-            })
-        })
+    // The debug overlay, which the plan has already drawn: shown or not.
+    let tags = move || match debug.get() {
+        false => String::new(),
+        true => plan.with(|outcome| match outcome.as_ref() {
+            Some(Ok(p)) => p.tags.clone(),
+            _ => String::new(),
+        }),
     };
 
     window_event_listener(leptos::ev::resize, move |_| size.set(window_size()));
@@ -738,6 +1061,7 @@ fn App() -> impl IntoView {
             let (under, over) = (text[body.start..cut].to_string(), text[cut..body.end].to_string());
             let vb = network.view_box;
             start_scale(&network, scale, y_max);
+            services.set(Services::for_network(&network));
             origin.set(None);
             destination.set(None);
             error.set(None);
@@ -859,7 +1183,7 @@ fn App() -> impl IntoView {
                     // Over everything, and only while the panel is open: this
                     // is the one time it can be moved, and it would otherwise
                     // sit on top of a station for no reason.
-                    <Show when=move || settings.get()>
+                    <Show when=move || panel.get() == Some(Panel::Scale)>
                         {move || {
                             let (cx, cy) = scale.get().centre;
                             let z = view.get().zoom.max(1e-6);
@@ -915,36 +1239,45 @@ fn App() -> impl IntoView {
                                 // the itinerary so it comes and goes with it.
                                 <style>{p.css}</style>
                                 <div class="itinerary">
-                                    <p class="plan-note">
-                                        {format!(
-                                            "{} station{} · {} transfer{}",
-                                            p.stations, if p.stations == 1 { "" } else { "s" },
-                                            p.transfers, if p.transfers == 1 { "" } else { "s" },
-                                        )}
-                                        {move || measure.get()
-                                            .map(|m| format!(" · {}", km_text(m.total)))}
-                                    </p>
+                                    <p class="plan-time">{mins_text(p.seconds)}</p>
+                                    <p class="plan-note">{format!(
+                                        "{} · {} station{} · {} transfer{}",
+                                        km_text(p.km),
+                                        p.stations, if p.stations == 1 { "" } else { "s" },
+                                        p.transfers, if p.transfers == 1 { "" } else { "s" },
+                                    )}</p>
                                     {p.rows.into_iter().map(|row| match row {
-                                        Row::Ride { line, colour, stations, leg } => view! {
+                                        Row::Ride {
+                                            line, colour, stations, km, seconds, every,
+                                        } => view! {
                                             <div class="ride">
                                                 <span class="swatch"
                                                       style=format!("background:{colour}")></span>
-                                                <span class="ride-line">{line}</span>
-                                                <span class="ride-count">
-                                                    <span>{format!(
-                                                        "{stations} station{}",
+                                                <div class="ride-body">
+                                                    <div class="ride-top">
+                                                        <span class="ride-line">{line}</span>
+                                                        <span class="ride-time">
+                                                            {secs_text(seconds)}
+                                                        </span>
+                                                    </div>
+                                                    <div class="ride-sub">{format!(
+                                                        "{stations} station{} · {} · {every}",
                                                         if stations == 1 { "" } else { "s" },
-                                                    )}</span>
-                                                    <span class="ride-km">
-                                                        {move || measure.get()
-                                                            .and_then(|m| m.legs.get(leg).copied())
-                                                            .map(km_text)}
-                                                    </span>
-                                                </span>
+                                                        km_text(km),
+                                                    )}</div>
+                                                </div>
                                             </div>
                                         }.into_any(),
-                                        Row::Transfer { at } => view! {
-                                            <div class="transfer">{format!("transfer at {at}")}</div>
+                                        Row::Transfer { at, seconds, detail } => view! {
+                                            <div class="transfer">
+                                                <div class="transfer-top">
+                                                    <span>{format!("transfer at {at}")}</span>
+                                                    <span class="transfer-time">
+                                                        {secs_text(seconds)}
+                                                    </span>
+                                                </div>
+                                                <div class="transfer-sub">{detail}</div>
+                                            </div>
                                         }.into_any(),
                                     }).collect_view()}
                                 </div>
@@ -966,16 +1299,23 @@ fn App() -> impl IntoView {
                 <button class="btn btn-wide" title="Fit map to window"
                         on:click=move |_| refit()>"Fit"</button>
                 <button class="btn btn-wide" title="Set what a map unit is worth"
-                        class:on=move || settings.get()
-                        on:click=move |_| settings.update(|v| *v = !*v)>"Scale"</button>
+                        class:on=move || panel.get() == Some(Panel::Scale)
+                        on:click=move |_| toggle(Panel::Scale)>"Scale"</button>
+                <button class="btn btn-wide" title="Set what each line is and how fast it runs"
+                        class:on=move || panel.get() == Some(Panel::Service)
+                        on:click=move |_| toggle(Panel::Service)>"Service"</button>
             </div>
 
-            <Show when=move || settings.get()>
-                {move || doc.get().map(|d| view! {
+            {move || doc.get().map(|d| match panel.get() {
+                Some(Panel::Scale) => view! {
                     <ScalePanel net=Arc::clone(&d.net) scale=scale y_max=y_max
-                                open=settings debug=debug />
-                })}
-            </Show>
+                                panel=panel debug=debug />
+                }.into_any(),
+                Some(Panel::Service) => view! {
+                    <ServicePanel net=Arc::clone(&d.net) services=services panel=panel />
+                }.into_any(),
+                None => ().into_any(),
+            })}
         </Show>
 
         <Show when=move || doc.with(Option::is_none)>
@@ -1117,6 +1457,39 @@ mod tests {
         assert_eq!(axis_step(100.0, true), 150.0);
         assert_eq!(axis_step(150.0, false), 100.0);
         assert_eq!(axis_step(50.0, false), 25.0);
+    }
+
+    #[test]
+    fn a_frequency_is_said_the_way_a_timetable_says_it() {
+        assert_eq!(every_text(0.5), "every 30 seconds");
+        assert_eq!(every_text(1.0), "every minute");
+        assert_eq!(every_text(1.5), "every 90 seconds");
+        assert_eq!(every_text(2.0), "every 2 min");
+        assert_eq!(every_text(2.5), "every 2.5 min");
+        assert_eq!(every_text(20.0), "every 20 min");
+        assert_eq!(every_text(120.0), "every 120 min");
+    }
+
+    #[test]
+    fn a_journey_is_quoted_in_minutes_because_nobody_plans_in_seconds() {
+        assert_eq!(mins_text(0.0), "under a minute");
+        assert_eq!(mins_text(25.0), "under a minute");
+        assert_eq!(mins_text(45.0), "1 min");
+        assert_eq!(mins_text(1_989.0), "33 min");
+        assert_eq!(mins_text(3_600.0), "1 h 00 min");
+        assert_eq!(mins_text(5_430.0), "1 h 31 min");
+    }
+
+    #[test]
+    fn a_duration_reads_as_a_timetable_prints_it() {
+        assert_eq!(secs_text(0.0), "0 s");
+        assert_eq!(secs_text(-3.0), "0 s", "nothing takes less than no time");
+        assert_eq!(secs_text(47.4), "47 s");
+        assert_eq!(secs_text(65.3), "1:05");
+        assert_eq!(secs_text(600.0), "10:00");
+        // The carry that a naive split gets wrong.
+        assert_eq!(secs_text(59.6), "1:00");
+        assert_eq!(secs_text(119.7), "2:00");
     }
 
     #[test]

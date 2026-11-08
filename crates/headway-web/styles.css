@@ -243,25 +243,48 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ride-count {
-  flex: none;
+.ride-body {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  line-height: 1.3;
-  color: var(--muted);
-  font-size: .78rem;
+  gap: .05rem;
+}
+.ride-top { display: flex; align-items: baseline; gap: .5rem; }
+.ride-time {
+  flex: none;
+  font-size: .82rem;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
-.ride-km { color: var(--ink); }
+.ride-sub {
+  color: var(--muted);
+  font-size: .72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The headline number, now that a journey has one. */
+.plan-time {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 650;
+  letter-spacing: -.01em;
+  font-variant-numeric: tabular-nums;
+}
 
 .transfer {
+  display: flex;
+  flex-direction: column;
   padding: .1rem 0 .1rem 1.1rem;
   border-left: 2px dotted var(--line);
   margin-left: .55rem;
   color: var(--muted);
   font-size: .78rem;
 }
+.transfer-top { display: flex; justify-content: space-between; gap: .5rem; }
+.transfer-time { font-variant-numeric: tabular-nums; }
+/* What the change is made of: the walk, and then half the headway. */
+.transfer-sub { font-size: .68rem; opacity: .85; font-variant-numeric: tabular-nums; }
 
 .hints {
   position: absolute;
@@ -333,6 +356,8 @@ body {
 .check input { flex: none; margin: 0; accent-color: var(--accent); }
 .row-label { flex: none; font-size: .78rem; font-weight: 600; }
 .row .readout { flex: 1; }
+.row-unit { flex: 1; color: var(--muted); font-size: .68rem; line-height: 1.2; }
+.num.walk { flex: none; width: 3.6rem; }
 
 /* The graph is drawn in its own pixel space and scaled to the panel's width,
    so pointer positions are divided back into those units before they are read
@@ -394,3 +419,142 @@ body {
    point: it should read as a note on the drawing, not as chrome floating over
    it. Nothing here is interactive, so it never takes a click off the map. */
 .tags { pointer-events: none; }
+
+/* ---------- service categories ---------- */
+
+.cat {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  padding: .5rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+/* The card a dragged line would land in. */
+.cat.over {
+  border-color: var(--accent);
+  background: rgba(127, 127, 160, .12);
+}
+
+.cat-head { display: flex; align-items: center; gap: .4rem; }
+.cat-dot { flex: none; width: .6rem; height: .6rem; border-radius: 50%; }
+/* An input that reads as a heading until it is hovered or focused, because a
+   category's name is almost always already right. */
+.cat-name {
+  flex: 1;
+  min-width: 0;
+  height: 1.8rem;
+  padding: 0 .35rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: .82rem;
+  font-weight: 600;
+}
+.cat-name:hover { border-color: var(--line); }
+.cat-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.badge {
+  flex: none;
+  padding: .05rem .3rem;
+  border-radius: 5px;
+  background: rgba(127, 127, 160, .18);
+  color: var(--muted);
+  font-size: .62rem;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+/* Two by two rather than a row of four: at this width four fields would be
+   narrower than the numbers in them. */
+.nums { display: grid; grid-template-columns: repeat(2, 1fr); gap: .3rem; }
+.nums label {
+  display: flex;
+  flex-direction: column;
+  gap: .15rem;
+  color: var(--muted);
+  font-size: .62rem;
+}
+.num {
+  width: 100%;
+  height: 1.7rem;
+  padding: 0 .3rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: .78rem;
+  font-variant-numeric: tabular-nums;
+}
+.num:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.cat-note { margin: 0; color: var(--muted); font-size: .68rem; }
+
+.zone {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem;
+  min-height: 1.9rem;
+  padding: .25rem;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+.zone-empty { padding: .15rem .2rem; color: var(--muted); font-size: .7rem; }
+
+.line-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .25rem;
+  max-width: 100%;
+  padding: .12rem .2rem .12rem .3rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  font-size: .72rem;
+  white-space: nowrap;
+}
+/* The part that drags. The frequency field beside it is deliberately outside
+   it: an input inside a draggable element is a fight to click into. */
+.chip-grab {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: grab;
+}
+.chip-grab:active { cursor: grabbing; }
+
+/* A line's own headway. Empty means it follows its category, and the
+   placeholder then shows what that comes to. */
+.freq {
+  width: 2.5rem;
+  height: 1.25rem;
+  padding: 0 .15rem;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: .68rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.freq::-webkit-outer-spin-button,
+.freq::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.freq:hover, .freq:focus { border-color: var(--line); background: var(--canvas); }
+.freq:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Tapped rather than dragged: waiting for a category to be tapped. */
+.line-chip.picked {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(127, 127, 220, .3);
+}
+.chip-swatch { flex: none; width: .5rem; height: .5rem; border-radius: 2px; }
+
+.add { align-self: flex-start; }

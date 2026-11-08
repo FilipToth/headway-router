@@ -5,7 +5,9 @@
 //! does not break the suite.
 
 use headway_core::network::Shape;
-use headway_core::{fade, fastest, parse, root_inner_range, trace, Cell, Network, Scale};
+use headway_core::{
+    fade, fastest, parse, root_inner_range, trace, Cell, Network, Scale, Services, Timing,
+};
 
 fn real_map() -> Option<Network> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../muvit-amandleng.svg");
@@ -187,7 +189,8 @@ fn a_journey_is_traced_over_the_track_it_rides() {
     let net = map_or_skip!();
     let from = net.station_named("Zamalek").expect("Zamalek is on the map");
     let to = net.station_named("Xiguan").expect("Xiguan is on the map");
-    let journey = fastest(&net, from, to).expect("Zamalek reaches Xiguan");
+    let timing = Timing::fresh(&net);
+    let journey = fastest(&timing, from, to).expect("Zamalek reaches Xiguan");
     let svg = trace(&net, &journey);
 
     assert_eq!(
@@ -260,7 +263,8 @@ fn a_journey_measures_as_its_profile_says_it_should() {
     let net = map_or_skip!();
     let from = net.station_named("Zamalek").expect("Zamalek is on the map");
     let to = net.station_named("Xiguan").expect("Xiguan is on the map");
-    let journey = fastest(&net, from, to).expect("Zamalek reaches Xiguan");
+    let timing = Timing::fresh(&net);
+    let journey = fastest(&timing, from, to).expect("Zamalek reaches Xiguan");
 
     // Measured one for one, the real distance is the drawn distance: the check
     // that nothing has silently crept into the measurement itself.
@@ -296,4 +300,64 @@ fn a_journey_measures_as_its_profile_says_it_should() {
     let shorter = squeezed.journey_km(&net, &journey);
     assert!(shorter < measured * 0.8, "{shorter} km should undercut {measured} km");
     assert!(shorter > 0.0, "a journey still covers ground");
+}
+
+#[test]
+fn a_fresh_map_sorts_its_lines_by_how_they_are_drawn() {
+    let net = map_or_skip!();
+    let services = Services::for_network(&net);
+    assert_eq!(services.lines(), net.lines.len());
+
+    // This map draws metro, tram and commuter rail, so there is a category
+    // for each, and the commonest is the default nothing had to be dragged to.
+    let names: Vec<&str> = services.categories().iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["Metro", "Commuter rail", "Tram"], "commonest first");
+
+    let mut counted = 0;
+    for (at, category) in services.categories().iter().enumerate() {
+        let want = match category.name.as_str() {
+            "Metro" => headway_core::Mode::Metro,
+            "Tram" => headway_core::Mode::Tram,
+            _ => headway_core::Mode::CommuterRail,
+        };
+        for id in services.lines_in(at) {
+            assert_eq!(net.line(id).mode, want, "{} is in {}", net.line(id).name, category.name);
+            counted += 1;
+        }
+    }
+    assert_eq!(counted, net.lines.len(), "every line is in exactly one category");
+
+    let default = &services.categories()[0];
+    assert!(services.lines_in(0).len() * 2 > net.lines.len(), "the default holds most of them");
+    assert!(default.run_time(1.0) > 0.0 && default.run_time(1.0) < 600.0);
+}
+
+#[test]
+fn a_real_journey_is_timed_by_the_model_it_was_planned_with() {
+    let net = map_or_skip!();
+    let timing = Timing::fresh(&net);
+    let from = net.station_named("Zamalek").expect("Zamalek is on the map");
+    let to = net.station_named("Xiguan").expect("Xiguan is on the map");
+    let journey = fastest(&timing, from, to).expect("Zamalek reaches Xiguan");
+
+    // The number searched on and the number shown have to be the same one, or
+    // the app recommends a route by one model and describes it with another.
+    assert!(
+        (journey.seconds - timing.journey(&journey)).abs() < 1e-6,
+        "searched {} s, reported {} s",
+        journey.seconds,
+        timing.journey(&journey),
+    );
+    let legs: f64 = journey.legs.iter().map(|leg| timing.leg(leg)).sum();
+    let changes: f64 = journey.legs.iter().skip(1).map(|leg| timing.boarding(leg.line)).sum();
+    assert!((journey.seconds - legs - changes).abs() < 1e-6, "the parts add up to the whole");
+
+    // And the whole is a believable way to spend the distance.
+    let km = Scale::for_network(&net).journey_km(&net, &journey);
+    let kmh = km / (journey.seconds / 3600.0);
+    assert!(
+        (15.0..90.0).contains(&kmh),
+        "{kmh:.0} km/h door to door over {km:.1} km in {:.0} s",
+        journey.seconds,
+    );
 }

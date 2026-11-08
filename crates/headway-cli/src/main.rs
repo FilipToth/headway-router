@@ -2,9 +2,10 @@
 //!
 //!     headway <map.svg> [--lines] [--stations] [--warnings] [--line <name>]
 //!                       [--route <from> <to>] [--find <query>] [--paint]
+//!                       [--profile <units>:<km>,...] [--centre <x>,<y>]
 
 use headway_core::network::{Marker, Shape};
-use headway_core::{fade, fastest, parse, trace, Network, StationId};
+use headway_core::{fade, fastest, parse, tag, trace, Network, Scale, StationId};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -12,7 +13,8 @@ fn main() -> ExitCode {
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!(
             "usage: headway <map.svg> [--lines] [--stations] [--warnings] [--line <name>] \
-             [--route <from> <to>] [--find <query>] [--paint]"
+             [--route <from> <to>] [--find <query>] [--paint] \
+             [--profile <units>:<km>,...] [--centre <x>,<y>]"
         );
         return ExitCode::from(2);
     }
@@ -58,7 +60,7 @@ fn main() -> ExitCode {
             eprintln!("--route needs two station names");
             return ExitCode::from(2);
         };
-        return route(&net, from, to, want("--paint"));
+        return route(&net, from, to, want("--paint"), &scale(&net, &args));
     }
 
     summary(&net, path);
@@ -72,6 +74,40 @@ fn main() -> ExitCode {
         warnings(&net);
     }
     ExitCode::SUCCESS
+}
+
+/// The distance model to report in, which the web app's settings panel edits.
+///
+/// `--profile 20:4,130:78` gives the control points as `units:km` from the
+/// centre, and `--centre -3.5,12` moves the centre they are measured from.
+/// Without them the map gets the default profile: centred on its stations,
+/// worth little per unit in the middle and several times that at the rim.
+fn scale(net: &Network, args: &[String]) -> Scale {
+    let mut base = Scale::for_network(net);
+    if let Some(spec) = args.iter().position(|a| a == "--centre").and_then(|i| args.get(i + 1)) {
+        match spec.split_once(',').and_then(|(x, y)| {
+            Some((x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?))
+        }) {
+            Some(at) => base.centre = at,
+            None => eprintln!("--centre wants a pair like -3.5,12; ignoring {spec:?}"),
+        }
+    }
+    let Some(spec) = args.iter().position(|a| a == "--profile").and_then(|i| args.get(i + 1))
+    else {
+        return base;
+    };
+    let points: Vec<(f64, f64)> = spec
+        .split(',')
+        .filter_map(|pair| {
+            let (r, km) = pair.split_once(':')?;
+            Some((r.trim().parse().ok()?, km.trim().parse().ok()?))
+        })
+        .collect();
+    if points.is_empty() {
+        eprintln!("--profile wants pairs like 20:4,130:78; ignoring {spec:?}");
+        return base;
+    }
+    Scale::from_points(base.centre, points)
 }
 
 fn summary(net: &Network, path: &str) {
@@ -110,6 +146,11 @@ fn summary(net: &Network, path: &str) {
         let named_out = unreachable.iter().filter(|id| net.station(**id).is_searchable()).count();
         println!("                 of those unreachable, {named_out} are named");
     }
+    let scale = Scale::for_network(net);
+    println!(
+        "  scale          centre ({}, {}), profile out to {} units",
+        scale.centre.0, scale.centre.1, scale.reach(),
+    );
 }
 
 fn lines(net: &Network, only: Option<&str>) {
@@ -222,7 +263,7 @@ fn find(net: &Network, needle: &str) -> Result<StationId, String> {
     }
 }
 
-fn route(net: &Network, from: &str, to: &str, paint: bool) -> ExitCode {
+fn route(net: &Network, from: &str, to: &str, paint: bool, scale: &Scale) -> ExitCode {
     let (from, to) = match (find(net, from), find(net, to)) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => {
@@ -238,19 +279,28 @@ fn route(net: &Network, from: &str, to: &str, paint: bool) -> ExitCode {
         }
         Ok(journey) => {
             println!(
-                "  {} stations, {} transfer(s), {:.1} units of track, cost {:.1}",
+                "  {} stations, {} transfer(s), {:.1} units of track, {:.1} km, cost {:.1}",
                 journey.stations(),
                 journey.transfers(),
                 journey.distance(net),
+                scale.journey_km(net, &journey),
                 journey.cost,
+            );
+            println!(
+                "  measured from ({}, {}) at {:.2} km/unit in the centre, {:.2} at the edge",
+                scale.centre.0,
+                scale.centre.1,
+                scale.km_per_unit(0.0),
+                scale.km_per_unit(scale.reach()),
             );
             println!();
             for (i, leg) in journey.legs.iter().enumerate() {
                 println!(
-                    "    {:<30}{:>3} station{}",
+                    "    {:<30}{:>3} station{}{:>9.1} km",
                     net.line(leg.line).name,
                     leg.stations(),
                     if leg.stations() == 1 { "" } else { "s" },
+                    scale.leg_km(net, leg),
                 );
                 if i + 1 < journey.legs.len() {
                     println!("    transfer at {}", net.label(leg.alight()));
@@ -268,6 +318,21 @@ fn route(net: &Network, from: &str, to: &str, paint: bool) -> ExitCode {
                 // Whole, not truncated: this output exists to be checked
                 // against the map's own markup.
                 for piece in drawn.split_inclusive("/>") {
+                    println!("    {piece}");
+                }
+                // The debug layer, as the panel's toggle draws it: one
+                // distance per stretch of track between two stations.
+                let mut hops = Vec::new();
+                let mut texts = Vec::new();
+                for leg in &journey.legs {
+                    for hop in leg.segments(net) {
+                        texts.push(format!("{:.1} km", scale.length(&hop)));
+                        hops.push(hop);
+                    }
+                }
+                println!();
+                println!("  {} section tag(s):", hops.len());
+                for piece in tag(&hops, &texts).split_inclusive("</text>") {
                     println!("    {piece}");
                 }
             }

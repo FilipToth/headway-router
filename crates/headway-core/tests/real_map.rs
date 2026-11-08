@@ -5,7 +5,7 @@
 //! does not break the suite.
 
 use headway_core::network::Shape;
-use headway_core::{fade, fastest, parse, root_inner_range, trace, Cell, Network};
+use headway_core::{fade, fastest, parse, root_inner_range, trace, Cell, Network, Scale};
 
 fn real_map() -> Option<Network> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../muvit-amandleng.svg");
@@ -229,4 +229,71 @@ fn a_journey_is_traced_over_the_track_it_rides() {
             assert!(css.contains(stroke.as_str()), "{} stays saturated", line.name);
         }
     }
+}
+
+#[test]
+fn a_fresh_scale_reaches_every_station_on_the_map() {
+    let net = map_or_skip!();
+    let scale = Scale::for_network(&net);
+    let vb = net.view_box;
+
+    assert!(
+        (vb.min_x..vb.min_x + vb.width).contains(&scale.centre.0)
+            && (vb.min_y..vb.min_y + vb.height).contains(&scale.centre.1),
+        "the default centre {:?} fell outside the map",
+        scale.centre,
+    );
+    for s in &net.stations {
+        let (x, y) = s.cell.centre();
+        let r = (x - scale.centre.0).hypot(y - scale.centre.1);
+        assert!(
+            r <= scale.reach() + 1e-9,
+            "{} sits {r:.1} units out, past the profile's {:.1} unit reach",
+            net.label(s.id),
+            scale.reach(),
+        );
+    }
+}
+
+#[test]
+fn a_journey_measures_as_its_profile_says_it_should() {
+    let net = map_or_skip!();
+    let from = net.station_named("Zamalek").expect("Zamalek is on the map");
+    let to = net.station_named("Xiguan").expect("Xiguan is on the map");
+    let journey = fastest(&net, from, to).expect("Zamalek reaches Xiguan");
+
+    // Measured one for one, the real distance is the drawn distance: the check
+    // that nothing has silently crept into the measurement itself.
+    let fresh = Scale::for_network(&net);
+    let plain = Scale::from_points(fresh.centre, vec![(fresh.reach(), fresh.reach())]);
+    let drawn = journey.distance(&net);
+    let measured = plain.journey_km(&net, &journey);
+    assert!(
+        (measured - drawn).abs() < 1e-6,
+        "{measured} km measured against {drawn} units of track",
+    );
+    let legs: f64 = journey.legs.iter().map(|l| plain.leg_km(&net, l)).sum();
+    assert!((legs - measured).abs() < 1e-9, "the legs must add up to the journey");
+
+    // A fresh profile is a shape, not a measurement: a map unit is worth far
+    // less in the middle than at the rim, and the furthest station still lands
+    // at roughly its drawn distance in km.
+    let (middle, rim) = (fresh.km_per_unit(0.0), fresh.km_per_unit(fresh.reach()));
+    assert!(rim > middle * 3.0, "{rim} km/unit at the rim against {middle} in the middle");
+    assert!(
+        (fresh.real_radius(fresh.reach()) - fresh.reach()).abs() < fresh.reach() * 0.1,
+        "a fresh map should still be about {} km across, not {}",
+        fresh.reach(),
+        fresh.real_radius(fresh.reach()),
+    );
+
+    // A profile that says the drawn centre is stretched has to come out
+    // shorter — that is the whole point of the setting.
+    let squeezed = Scale::from_points(
+        plain.centre,
+        vec![(20.0, 4.0), (plain.reach(), plain.reach() * 0.6)],
+    );
+    let shorter = squeezed.journey_km(&net, &journey);
+    assert!(shorter < measured * 0.8, "{shorter} km should undercut {measured} km");
+    assert!(shorter > 0.0, "a journey still covers ground");
 }

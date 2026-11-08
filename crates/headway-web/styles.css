@@ -87,6 +87,7 @@ body {
   backdrop-filter: blur(8px);
 }
 .btn:hover { border-color: var(--accent); }
+.btn.on { border-color: var(--accent); color: var(--accent); }
 .btn:active { transform: translateY(1px); }
 .btn-wide { font-size: .85rem; }
 .btn-quiet { height: 1.9rem; min-width: 0; font-size: .8rem; background: transparent; border-color: transparent; color: var(--accent); }
@@ -244,10 +245,15 @@ body {
 }
 .ride-count {
   flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.3;
   color: var(--muted);
   font-size: .78rem;
   font-variant-numeric: tabular-nums;
 }
+.ride-km { color: var(--ink); }
 
 .transfer {
   padding: .1rem 0 .1rem 1.1rem;
@@ -293,3 +299,98 @@ body {
 .planner > style {
   display: none;
 }
+
+/* ---------- distance settings ---------- */
+
+/* Beside the map, never over it: the centre is dragged on the map itself and
+   the profile is shaped against the station distances the graph draws, so both
+   have to be readable at the same time. */
+.panel {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  width: min(20rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  padding: .75rem;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+}
+.panel-head { display: flex; align-items: center; gap: .5rem; }
+.panel-title { flex: 1; font-size: .9rem; font-weight: 600; }
+.panel-note { margin: 0; color: var(--muted); font-size: .72rem; }
+
+.row { display: flex; align-items: center; gap: .4rem; }
+.rule { height: 1px; background: var(--line); margin: .1rem 0; }
+.check { display: flex; align-items: center; gap: .45rem; font-size: .76rem; cursor: pointer; }
+.check input { flex: none; margin: 0; accent-color: var(--accent); }
+.row-label { flex: none; font-size: .78rem; font-weight: 600; }
+.row .readout { flex: 1; }
+
+/* The graph is drawn in its own pixel space and scaled to the panel's width,
+   so pointer positions are divided back into those units before they are read
+   as a radius and a distance. */
+.graph {
+  display: block;
+  width: 100%;
+  height: auto;
+  touch-action: none;
+  cursor: crosshair;
+}
+.graph .plot { fill: rgba(127, 127, 160, .07); stroke: var(--line); }
+/* Stations by how far out they are drawn. */
+.graph .bar { fill: rgba(127, 127, 160, .3); }
+.graph .grid { stroke: var(--line); stroke-width: .5; }
+/* The uploaded map's own stylesheet carries `svg *{font-family:'PT Sans';
+   font-weight:bold}`, which reaches every svg on the page once it is injected
+   — this graph included. Said back explicitly so the panel keeps the interface
+   font whatever a map brings with it. */
+.graph .tick, .graph .axis-name {
+  fill: var(--muted);
+  font-size: 8px;
+  font-family: inherit;
+  font-weight: 400;
+}
+.graph .axis-name { font-size: 7.5px; }
+/* The rate, against its own peak rather than the kilometre axis. Quiet, since
+   the profile is what is being dragged — but present, because the rate is what
+   the distances on the map are actually made of. */
+.graph .slope {
+  stroke: var(--muted);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 2.5;
+  opacity: .8;
+}
+.graph .curve {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.graph .knob { fill: var(--panel); stroke: var(--accent); stroke-width: 2; cursor: grab; }
+.graph .knob.held { stroke-width: 3; cursor: grabbing; }
+/* The origin: the centre is no distance from itself, so there is nothing
+   there to drag. */
+.graph .knob.pinned { fill: var(--muted); stroke: var(--muted); cursor: default; }
+
+/* The crosshair on the map. Fixed colours, not themed ones: it is drawn over
+   the map, which stays light whatever the surrounding chrome does. Only the
+   invisible grab disc takes pointer events, so the map still pans when the
+   pointer lands beside the handle rather than on it. */
+.centre { pointer-events: none; }
+.centre .halo { fill: none; stroke: #fff; stroke-linecap: round; }
+.centre .ink { fill: none; stroke: #2a4bd7; stroke-linecap: round; }
+.centre .grab { fill: transparent; pointer-events: auto; cursor: grab; }
+.centre.moving .grab { cursor: grabbing; }
+
+/* Leg distances written on the map. Inherits the map's own font, which is the
+   point: it should read as a note on the drawing, not as chrome floating over
+   it. Nothing here is interactive, so it never takes a click off the map. */
+.tags { pointer-events: none; }

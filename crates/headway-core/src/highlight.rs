@@ -7,6 +7,7 @@
 //! over it as new, bolder geometry.
 
 use crate::network::{Line, Network};
+use crate::path::polyline_length;
 use crate::route::Journey;
 use std::collections::BTreeSet;
 
@@ -38,6 +39,17 @@ pub const HALO_OPACITY: f64 = 0.3;
 /// than the line's colour, for the same reason the casing exists.
 pub const STOP_RADIUS: f64 = 0.13;
 pub const STOP_RING: f64 = 0.075;
+/// A tag's text height in grid units. Close to the map's own station labels at
+/// 0.4, because there is one tag per stretch of track and a louder one would
+/// collide with its neighbours on the short hops.
+pub const TAG_SIZE: f64 = 0.42;
+/// How far a tag stands off the track it is labelling.
+pub const TAG_OFFSET: f64 = 0.45;
+/// The white the tag's text is outlined in, so it reads over whatever it lands
+/// on. Drawn behind the letters by `paint-order`, not over them.
+pub const TAG_HALO: f64 = 0.16;
+/// Longest tag accepted, in characters. A distance is a handful of them.
+const TAG_LIMIT: usize = 24;
 
 /// Class on the route's own strokes, and the one piece of coupling between the
 /// two halves of this module.
@@ -134,6 +146,82 @@ pub fn trace(net: &Network, journey: &Journey) -> String {
         }
     }
     svg
+}
+
+/// A line of text per stretch of track, for reading distances off the map
+/// itself.
+///
+/// Takes drawn geometry rather than a journey, because its callers already
+/// have it — `Leg::segments` for a stretch, `Leg::polyline` for a whole ride —
+/// and because the text comes from the scale, which this module knows nothing
+/// about. A stretch with no text in `texts` goes untagged.
+pub fn tag(stretches: &[Vec<(f64, f64)>], texts: &[String]) -> String {
+    let mut svg = String::new();
+    for (points, text) in stretches.iter().zip(texts) {
+        let Some(((x, y), (dx, dy))) = midway(points) else {
+            continue;
+        };
+        // Right of travel, which puts an eastbound stretch's tag above it
+        // rather than under it, and never on the track it is measuring.
+        let (x, y) = (x + dy * TAG_OFFSET, y - dx * TAG_OFFSET);
+        svg.push_str(&format!(
+            "<text class=\"{LEG_CLASS}\" x=\"{x:.4}\" y=\"{y:.4}\" \
+             text-anchor=\"middle\" dominant-baseline=\"central\" \
+             font-size=\"{TAG_SIZE}\" font-weight=\"bold\" fill=\"{CASING}\" \
+             stroke=\"#fff\" stroke-width=\"{TAG_HALO}\" paint-order=\"stroke\">{}</text>",
+            escaped(text),
+        ));
+    }
+    svg
+}
+
+/// The point half way along a polyline *by length*, and the direction of
+/// travel there.
+///
+/// Half way along, not half way between the ends: a stretch that turns a
+/// corner, or doubles back, would otherwise be tagged somewhere off its own
+/// track.
+fn midway(points: &[(f64, f64)]) -> Option<((f64, f64), (f64, f64))> {
+    let half = polyline_length(points) / 2.0;
+    if !half.is_finite() || half <= 0.0 {
+        // A leg of no length is still somewhere, and is still worth a tag.
+        return points.first().map(|p| (*p, (1.0, 0.0)));
+    }
+    let mut walked = 0.0;
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let span = (b.0 - a.0).hypot(b.1 - a.1);
+        if span <= 0.0 {
+            continue;
+        }
+        if walked + span >= half {
+            let t = (half - walked) / span;
+            return Some((
+                (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t),
+                ((b.0 - a.0) / span, (b.1 - a.1) / span),
+            ));
+        }
+        walked += span;
+    }
+    None
+}
+
+/// Text on its way into the markup.
+///
+/// What it says is the caller's business — a distance, as it happens — but it
+/// is about to be handed to `innerHTML`, so the three characters that could
+/// end the element go in as entities and anything long is cut short.
+fn escaped(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars().take(TAG_LIMIT) {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// One stroke along a leg. Round caps and joins are what let the three passes
@@ -326,6 +414,58 @@ mod tests {
             "only the halo is translucent: {svg}",
         );
         assert_eq!(svg.matches("stroke-opacity").count(), 1, "{svg}");
+    }
+
+    #[test]
+    fn a_tag_stands_beside_the_middle_of_the_track_it_measures() {
+        // An L six units along and four up: half of its ten units of length is
+        // one unit past the corner, heading east.
+        let leg = vec![(0.0, 0.0), (0.0, 4.0), (6.0, 4.0)];
+        let svg = tag(&[leg], &["4.3 km".to_string()]);
+        assert!(svg.contains(">4.3 km</text>"), "{svg}");
+        assert!(svg.contains("x=\"1.0000\""), "one unit past the corner: {svg}");
+        assert!(
+            svg.contains(&format!("y=\"{:.4}\"", 4.0 - TAG_OFFSET)),
+            "clear of the track, not on it: {svg}",
+        );
+        assert!(svg.contains("paint-order=\"stroke\""), "haloed, or it reads as mud: {svg}");
+    }
+
+    #[test]
+    fn a_tag_is_placed_by_length_so_track_that_doubles_back_keeps_it() {
+        // Out ten units and back: half the length is the far end, which is
+        // where the rider actually is half way along.
+        let svg = tag(&[vec![(0.0, 0.0), (10.0, 0.0), (0.0, 0.0)]], &["2 km".to_string()]);
+        assert!(svg.contains("x=\"10.0000\""), "{svg}");
+        // Track drawn as a single point is still somewhere worth labelling.
+        let svg = tag(&[vec![(3.0, 7.0)]], &["0 m".to_string()]);
+        assert!(svg.contains("x=\"3.0000\"") && svg.contains(">0 m</text>"), "{svg}");
+        assert_eq!(tag(&[Vec::new()], &["7 km".to_string()]), "", "and nowhere is nowhere");
+    }
+
+    #[test]
+    fn tags_are_drawn_for_the_stretches_there_is_text_for() {
+        let hops = vec![vec![(0.0, 0.0), (2.0, 0.0)], vec![(2.0, 0.0), (5.0, 0.0)]];
+        assert_eq!(tag(&hops, &[]).matches("<text").count(), 0);
+        assert_eq!(tag(&hops, &["1 km".to_string()]).matches("<text").count(), 1);
+        let both = ["1 km".to_string(), "2 km".to_string()];
+        assert_eq!(tag(&hops, &both).matches("<text").count(), 2);
+        // More text than track is the caller's problem, not a panic.
+        let three = [both[0].clone(), both[1].clone(), "3 km".to_string()];
+        assert_eq!(tag(&hops, &three).matches("<text").count(), 2);
+    }
+
+    #[test]
+    fn a_tag_cannot_carry_markup_out_of_its_element() {
+        let nasty = "</text><script>alert(1)</script>".to_string();
+        let svg = tag(&[vec![(0.0, 0.0), (1.0, 0.0)]], &[nasty]);
+        assert_eq!(svg.matches("</text>").count(), 1, "one element, closed once: {svg}");
+        assert!(!svg.contains("<script"), "{svg}");
+        assert!(svg.contains("&lt;"), "the brackets survive as text: {svg}");
+        assert!(
+            svg.chars().count() < 400,
+            "a tag is a distance, so an essay is cut short: {svg}",
+        );
     }
 
     #[test]

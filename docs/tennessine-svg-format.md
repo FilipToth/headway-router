@@ -33,7 +33,7 @@ multiples of **0.095** (and `0.095/√2 ≈ 0.067` on diagonals), so a drawn poi
 `cell ± k·0.095`, never exactly the cell centre. Snapping removes the offset.
 
 There is **no scale bar and no real-world distance anywhere in the file.** Grid
-units are the only metric available.
+units are the only metric the file offers; see gotcha 5 for what is done about it.
 
 ## 3. Layer 1 — the key
 
@@ -135,8 +135,29 @@ in this map are labelled *only* with the tram icon.
    the large group of `fill="none"` `M`/`L` paths.
 4. Don't hard-code the half-integer grid phase — derive it from the modal fractional
    part of the coordinates.
-5. **No scale.** The user must supply a grid-units→km factor before any journey time,
-   acceleration or dwell model means anything.
+5. **No scale — and not one scale, either.** Nothing in the file is in metres,
+   and a schematic map is not drawn to a single scale anyway: the centre is
+   stretched until the interchanges and their labels fit, the suburbs squeezed
+   so the map ends somewhere. A single grid-units→km factor therefore cannot be
+   right everywhere. What does hold is that the distortion is *radial*, so
+   `scale::Scale` asks for the two things a user can judge by eye — where the
+   centre of the city is, and how far out a point really is for how far out it
+   is drawn — and treats them as a radial warp of the plane. A piece of track's
+   real length is the length of its warped polyline, sampled along it rather
+   than measured end to end, because the warp bends a straight segment (most
+   sharply near the centre, where a line passing close by is flung outwards).
+   The profile runs *smoothly* through its control points (monotone cubic, so
+   it can rise but never fall). That is not cosmetic: what converts a piece of
+   track is the profile's **slope**, and straight lines between the points make
+   the slope step at every one of them — two neighbouring sections of track,
+   one either side of a point, come out several times apart per unit. The panel
+   draws the slope alongside the profile for the same reason.
+   A fresh profile is a shape rather than a measurement — about 300 m per grid
+   unit at the centre rising to 2 km at the rim, which leaves the furthest
+   station roughly as many km out as it is drawn units out. The shape is what a
+   schematic map does to distance; the size is arbitrary, and dragging it is
+   the point of the settings panel.
+   Journey *times* need this plus a speed model, which is still to come.
 6. A station can be **drawn twice**, identically. Key stations by cell and merge.
 7. 52 stations carry no label and 2 are labelled only with an icon glyph. They are
    real stations and stay in the graph as interchange/through nodes; they are simply

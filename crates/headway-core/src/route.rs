@@ -55,6 +55,15 @@ impl Leg {
         })
     }
 
+    /// The leg's drawn geometry, one polyline per stretch of track between two
+    /// stations, in travel order.
+    ///
+    /// [`Self::polyline`] is these joined end to end. They are worth having
+    /// apart when each stretch is to be measured or labelled on its own.
+    pub fn segments(&self, net: &Network) -> Vec<Vec<(f64, f64)>> {
+        self.oriented(net).collect()
+    }
+
     /// The leg's drawn geometry as one polyline in travel order.
     ///
     /// Joining the segments matters for drawing: separate strokes meeting at a
@@ -375,6 +384,31 @@ mod tests {
             for e in &leg.edges {
                 assert_eq!(net.edge(*e).line, leg.line, "a leg stays on its line");
             }
+        }
+    }
+
+    #[test]
+    fn a_leg_breaks_into_the_stretches_it_is_joined_from() {
+        let net = net();
+        let j = fastest(&net, at(&net, "Pier"), at(&net, "Union")).unwrap();
+        for leg in &j.legs {
+            let stretches = leg.segments(&net);
+            assert_eq!(stretches.len(), leg.edges.len(), "one per segment ridden");
+
+            // Each stretch starts where the one before it ended, which is the
+            // station between them, and together they are the leg's polyline.
+            let mut joined = Vec::new();
+            for stretch in &stretches {
+                assert!(stretch.len() >= 2, "a stretch of track has length");
+                match joined.last() {
+                    None => joined.extend(stretch.iter().copied()),
+                    Some(end) => {
+                        assert_eq!(end, &stretch[0], "stretches meet at their station");
+                        joined.extend(stretch.iter().skip(1).copied());
+                    }
+                }
+            }
+            assert_eq!(joined, leg.polyline(&net));
         }
     }
 

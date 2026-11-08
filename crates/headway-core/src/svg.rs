@@ -54,10 +54,17 @@ pub fn parse_view_box(value: &str) -> Option<ViewBox> {
 /// the root tag holds no `>` inside an attribute value, which is true of every
 /// Tennessine export.
 pub fn root_inner(svg: &str) -> Option<&str> {
+    root_inner_range(svg).map(|r| &svg[r])
+}
+
+/// The byte range `root_inner` returns, for slicing the body against offsets
+/// the parser recorded — the station layer's, so a route can be drawn over the
+/// track but under the markers and labels.
+pub fn root_inner_range(svg: &str) -> Option<std::ops::Range<usize>> {
     let start = svg.find("<svg")?;
     let open_end = start + svg[start..].find('>')? + 1;
     let close = svg.rfind("</svg")?;
-    (close >= open_end).then(|| &svg[open_end..close])
+    (close >= open_end).then_some(open_end..close)
 }
 
 #[cfg(test)]
@@ -89,6 +96,13 @@ mod tests {
     fn root_inner_strips_the_prolog_and_the_root_tag() {
         let doc = format!("<!--Created for free with Tennessine's Metro Designer--><!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\">{TENNESSINE}<g><path d=\"M0 0\"/></g></svg>");
         assert_eq!(root_inner(&doc), Some("<g><path d=\"M0 0\"/></g>"));
+    }
+
+    #[test]
+    fn the_range_and_the_slice_agree() {
+        let doc = format!("<!DOCTYPE svg>{TENNESSINE}<g><path d=\"M0 0\"/></g></svg>");
+        let r = root_inner_range(&doc).expect("a range");
+        assert_eq!(&doc[r], root_inner(&doc).expect("a slice"));
     }
 
     #[test]

@@ -39,6 +39,55 @@ impl Leg {
     pub fn alight(&self) -> StationId {
         self.stops[self.stops.len() - 1]
     }
+
+    /// This leg's segments, each flipped if need be so it runs in travel order.
+    ///
+    /// Tennessine draws a segment in whichever direction it pleases, so nothing
+    /// that walks a leg can take the stored order on trust.
+    fn oriented<'a>(&'a self, net: &'a Network) -> impl Iterator<Item = Vec<(f64, f64)>> + 'a {
+        self.edges.iter().enumerate().map(move |(i, id)| {
+            let edge = net.edge(*id);
+            let mut points = edge.polyline.clone();
+            if self.stops.get(i) == Some(&edge.b) {
+                points.reverse();
+            }
+            points
+        })
+    }
+
+    /// The leg's drawn geometry as one polyline in travel order.
+    ///
+    /// Joining the segments matters for drawing: separate strokes meeting at a
+    /// station leave a notch at every corner, one stroke does not.
+    pub fn polyline(&self, net: &Network) -> Vec<(f64, f64)> {
+        let mut out: Vec<(f64, f64)> = Vec::new();
+        for points in self.oriented(net) {
+            match out.is_empty() {
+                true => out = points,
+                // the station the two segments share is already there
+                false => out.extend(points.into_iter().skip(1)),
+            }
+        }
+        out
+    }
+
+    /// Where this leg's stops sit **as drawn**, in travel order.
+    ///
+    /// Not the same as where the stations sit: parallel lines in a corridor are
+    /// offset from the cell centre by multiples of 0.095, so a marker placed at
+    /// the centre floats beside the route instead of sitting on it.
+    pub fn stop_points(&self, net: &Network) -> Vec<(f64, f64)> {
+        let mut out: Vec<(f64, f64)> = Vec::new();
+        for points in self.oriented(net) {
+            if let (Some(first), Some(last)) = (points.first(), points.last()) {
+                if out.is_empty() {
+                    out.push(*first);
+                }
+                out.push(*last);
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

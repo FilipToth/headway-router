@@ -255,6 +255,10 @@ pub struct Network {
     pub warnings: Vec<Warning>,
     /// Which station occupies each grid cell.
     pub by_cell: HashMap<Cell, StationId>,
+    /// Byte offset in the source SVG of the station layer's opening `<`. A
+    /// route highlight belongs exactly there: over the track, under the markers
+    /// and labels, so an interchange's circle still reads at a transfer.
+    pub station_layer_at: usize,
 }
 
 impl Network {

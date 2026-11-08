@@ -1,4 +1,4 @@
-use headway_core::{fastest, parse, root_inner, wash_except, Network, StationId, ViewBox};
+use headway_core::{fade, fastest, parse, root_inner_range, trace, Network, StationId, ViewBox};
 use leptos::ev::{KeyboardEvent, MouseEvent, PointerEvent, WheelEvent};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -75,8 +75,11 @@ impl View {
 #[derive(Clone)]
 struct MapDoc {
     name: String,
-    /// The contents of the uploaded root `<svg>`, re-parented under ours.
-    body: String,
+    /// The uploaded root `<svg>`'s contents, re-parented under ours and cut in
+    /// two at the station layer so a journey can be drawn between the halves:
+    /// over the track it rides, under the markers and labels that name it.
+    under: String,
+    over: String,
     vb: ViewBox,
     net: Arc<Network>,
 }
@@ -94,9 +97,10 @@ struct Plan {
     rows: Vec<Row>,
     stations: usize,
     transfers: usize,
-    /// Rules that fade every line this journey does not use, so the route is
-    /// the only saturated thing left on the map.
+    /// Rules that fade the whole network to a pale diagram.
     css: String,
+    /// The journey itself, drawn bold over that diagram.
+    trace: String,
 }
 
 fn window_size() -> (f64, f64) {
@@ -238,12 +242,12 @@ fn App() -> impl IntoView {
                             rows.push(Row::Transfer { at: net.label(leg.alight()) });
                         }
                     }
-                    let ridden: Vec<_> = journey.legs.iter().map(|l| l.line).collect();
                     Ok(Plan {
                         rows,
                         stations: journey.stations(),
                         transfers: journey.transfers(),
-                        css: wash_except(net, &ridden),
+                        css: fade(net),
+                        trace: trace(net, &journey),
                     })
                 }
             })
@@ -276,19 +280,23 @@ fn App() -> impl IntoView {
                     return;
                 }
             };
-            let Some(body) = root_inner(&text) else {
+            let Some(body) = root_inner_range(&text) else {
                 error.set(Some(format!("{name} has no root <svg> element.")));
                 doc.set(None);
                 return;
             };
+            // Clamped because the offset comes from the parser and the range
+            // from a scan of the same text: a mismatch should mis-stack the
+            // route layer, never panic on a slice.
+            let cut = network.station_layer_at.clamp(body.start, body.end);
+            let (under, over) = (text[body.start..cut].to_string(), text[cut..body.end].to_string());
             let vb = network.view_box;
-            let body = body.to_string();
             origin.set(None);
             destination.set(None);
             error.set(None);
             size.set(window_size());
             view.set(View::fit(vb, window_size()));
-            doc.set(Some(MapDoc { name, body, vb, net: Arc::new(network) }));
+            doc.set(Some(MapDoc { name, under, over, vb, net: Arc::new(network) }));
         });
     };
 
@@ -357,8 +365,17 @@ fn App() -> impl IntoView {
                 <svg class="stage"
                      xmlns="http://www.w3.org/2000/svg"
                      viewBox=move || view.get().view_box_attr(size.get())
-                     preserveAspectRatio="xMidYMid meet"
-                     inner_html=d.body />
+                     preserveAspectRatio="xMidYMid meet">
+                    // Three layers rather than one, so re-planning touches only
+                    // the middle one instead of re-parsing half a megabyte of
+                    // map. `g` is an SVG element to Leptos, so these are built
+                    // in the SVG namespace and the halves render as they did.
+                    <g inner_html=d.under />
+                    <g class="route" inner_html=move || {
+                        plan.get().and_then(Result::ok).map(|p| p.trace).unwrap_or_default()
+                    } />
+                    <g inner_html=d.over />
+                </svg>
             })}
         </div>
 

@@ -304,6 +304,7 @@ pub fn parse(svg: &str) -> Result<Network, ParseError> {
         edges,
         warnings,
         by_cell,
+        station_layer_at: station_layer.range().start,
     };
 
     // ---- consistency and reachability

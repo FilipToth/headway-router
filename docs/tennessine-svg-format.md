@@ -154,14 +154,30 @@ in this map are labelled *only* with the tram icon.
 11. **Nothing in the markup names a line.** No `id`, no `class`, no grouping per
     line — a path's only handle is its `stroke` attribute, and lines sharing a
     colour share that handle (§7.1). So re-styling one line in the browser means
-    either a CSS attribute selector on the stroke, which is what `wash::wash_except`
+    either a CSS attribute selector on the stroke, which is what `highlight::fade`
     does, or rewriting half a megabyte of SVG. Match on the attribute **exactly as
     written**: `rgb(0, 0, 255)` and `rgb(0,0,255)` are the same colour but different
     selectors, which is why `Line` keeps both a normalised `colour` and the file's
     own `strokes`. Usefully, the track carries `fill="none"` and a station's tick
     carries no `fill` at all, while every filled shape is a background area — so
     `path[fill="none"][stroke=C], path[stroke=C]:not([fill])` reaches a line's track
-    and its ticks and touches nothing else.
+    and its ticks and touches nothing else. Because of that, anything *we* draw in
+    a line's colour must be exempted from those rules — hence `highlight::LEG_CLASS`,
+    the only `class` attribute anywhere in the document.
+12. **Layer order is a z-order we can splice.** The station layer is a direct `<g>`
+    child of the root, with the track layers before it and `defs`/fonts after, so
+    the byte offset of its opening tag (`Network::station_layer_at`, from
+    roxmltree's `Node::range()`) is a clean seam: markup inserted there draws over
+    every line but under every marker and label. That is where a highlighted route
+    belongs — at a transfer the interchange's own circle still reads on top of it,
+    and no station name is ever covered. Nothing else in the file crosses the seam:
+    no `fill="none"` path appears after it.
+13. **Drawn track is not where the station is.** A line in a shared corridor is
+    offset perpendicular from the cell centre by multiples of 0.095 (§2), so a
+    segment's endpoint sits *near* its stop, not on it. Markers drawn along a route
+    must follow the geometry (`Leg::stop_points`), not the station's cell, or they
+    float beside the line. The same offset leaves a ≤0.095 gap where one line hands
+    over to another at a transfer; round caps close it.
 
 ## 8. Validation and degraded mode
 

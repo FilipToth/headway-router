@@ -1,10 +1,10 @@
 //! Drives the parser without a browser, which is how the parser gets checked.
 //!
 //!     headway <map.svg> [--lines] [--stations] [--warnings] [--line <name>]
-//!                       [--route <from> <to>] [--find <query>] [--css]
+//!                       [--route <from> <to>] [--find <query>] [--paint]
 
 use headway_core::network::{Marker, Shape};
-use headway_core::{fastest, parse, wash_except, Network, StationId};
+use headway_core::{fade, fastest, parse, trace, Network, StationId};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -12,7 +12,7 @@ fn main() -> ExitCode {
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!(
             "usage: headway <map.svg> [--lines] [--stations] [--warnings] [--line <name>] \
-             [--route <from> <to>] [--find <query>] [--css]"
+             [--route <from> <to>] [--find <query>] [--paint]"
         );
         return ExitCode::from(2);
     }
@@ -58,7 +58,7 @@ fn main() -> ExitCode {
             eprintln!("--route needs two station names");
             return ExitCode::from(2);
         };
-        return route(&net, from, to, want("--css"));
+        return route(&net, from, to, want("--paint"));
     }
 
     summary(&net, path);
@@ -222,7 +222,7 @@ fn find(net: &Network, needle: &str) -> Result<StationId, String> {
     }
 }
 
-fn route(net: &Network, from: &str, to: &str, css: bool) -> ExitCode {
+fn route(net: &Network, from: &str, to: &str, paint: bool) -> ExitCode {
     let (from, to) = match (find(net, from), find(net, to)) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => {
@@ -256,13 +256,20 @@ fn route(net: &Network, from: &str, to: &str, css: bool) -> ExitCode {
                     println!("    transfer at {}", net.label(leg.alight()));
                 }
             }
-            if css {
-                // The stylesheet the web app lays over the map for this journey.
-                let ridden: Vec<_> = journey.legs.iter().map(|l| l.line).collect();
-                let sheet = wash_except(net, &ridden);
+            if paint {
+                // Exactly what the web app lays over the map for this journey.
+                let sheet = fade(net);
+                let drawn = trace(net, &journey);
                 println!();
-                println!("  {} line(s) fade:", sheet.lines().count());
+                println!("  {} colour(s) fade:", sheet.lines().count());
                 print!("{sheet}");
+                println!();
+                println!("  route layer, {} bytes:", drawn.len());
+                // Whole, not truncated: this output exists to be checked
+                // against the map's own markup.
+                for piece in drawn.split_inclusive("/>") {
+                    println!("    {piece}");
+                }
             }
             ExitCode::SUCCESS
         }

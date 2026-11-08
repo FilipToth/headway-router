@@ -5,7 +5,7 @@
 //! does not break the suite.
 
 use headway_core::network::Shape;
-use headway_core::{fastest, parse, wash_except, Cell, Network};
+use headway_core::{fade, fastest, parse, root_inner_range, trace, Cell, Network};
 
 fn real_map() -> Option<Network> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../muvit-amandleng.svg");
@@ -141,6 +141,7 @@ fn parsing_is_deterministic() {
 #[test]
 fn every_drawn_line_can_be_addressed_in_a_stylesheet() {
     let net = map_or_skip!();
+    let css = fade(&net);
     for line in net.lines.iter().filter(|l| !l.edges.is_empty()) {
         assert!(
             !line.strokes.is_empty(),
@@ -149,9 +150,8 @@ fn every_drawn_line_can_be_addressed_in_a_stylesheet() {
             line.edges.len(),
         );
         for stroke in &line.strokes {
-            let fades = wash_except(&net, &[]);
             assert!(
-                fades.contains(&format!("[stroke=\"{stroke}\"]")),
+                css.contains(&format!("[stroke=\"{stroke}\"]")),
                 "{} is drawn in {stroke}, which no rule reaches",
                 line.name,
             );
@@ -160,39 +160,73 @@ fn every_drawn_line_can_be_addressed_in_a_stylesheet() {
 }
 
 #[test]
-fn a_journey_keeps_its_colour_while_the_rest_of_the_network_fades() {
+fn the_route_layer_slots_between_the_track_and_the_markers() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../muvit-amandleng.svg");
+    let Ok(svg) = std::fs::read_to_string(path) else {
+        eprintln!("skipping: no map at the workspace root");
+        return;
+    };
+    let net = parse(&svg).expect("the real map parses");
+    let body = root_inner_range(&svg).expect("a root <svg>");
+    let at = net.station_layer_at;
+    assert!(body.contains(&at), "the split must land inside the body");
+    assert!(svg[at..].starts_with("<g"), "it must land on a layer's opening tag");
+
+    // Everything the route is drawn over is behind it; the markers and labels
+    // that must stay on top are ahead of it.
+    let (under, over) = (&svg[body.start..at], &svg[at..body.end]);
+    assert!(under.contains("fill=\"none\""), "track belongs under the route");
+    assert!(under.contains("Key to lines"), "so does the key");
+    assert!(over.contains("<ellipse"), "interchange circles belong over it");
+    assert!(over.contains("<text"), "so do station labels");
+    assert!(!over.contains("fill=\"none\""), "no track should be left above it");
+}
+
+#[test]
+fn a_journey_is_traced_over_the_track_it_rides() {
     let net = map_or_skip!();
     let from = net.station_named("Zamalek").expect("Zamalek is on the map");
     let to = net.station_named("Xiguan").expect("Xiguan is on the map");
     let journey = fastest(&net, from, to).expect("Zamalek reaches Xiguan");
+    let svg = trace(&net, &journey);
 
-    let ridden: Vec<_> = journey.legs.iter().map(|l| l.line).collect();
-    let css = wash_except(&net, &ridden);
-    assert!(!css.is_empty(), "something must fade");
+    assert_eq!(
+        svg.matches("<path").count(),
+        journey.legs.len() * 3,
+        "a halo, a casing and a colour per leg",
+    );
+    assert_eq!(
+        svg.matches("<circle").count(),
+        journey.legs.iter().map(|l| l.stops.len()).sum::<usize>(),
+        "a dot at every stop",
+    );
+    for leg in &journey.legs {
+        let points = leg.polyline(&net);
+        assert!(points.len() > leg.edges.len(), "one joined polyline per leg");
 
-    for id in &ridden {
-        for stroke in &net.line(*id).strokes {
+        let stops = leg.stop_points(&net);
+        assert_eq!(stops.len(), leg.stops.len(), "a drawn point for every stop");
+        assert_eq!(stops[0], points[0], "the first stop starts the polyline");
+        assert_eq!(stops[stops.len() - 1], points[points.len() - 1], "the last ends it");
+
+        // Drawn track sits in its corridor slot, offset from the cell centre by
+        // multiples of 0.095 — near its station, never exactly on it.
+        for (drawn, stop) in stops.iter().zip(&leg.stops) {
+            let (cx, cy) = net.station(*stop).cell.centre();
+            let off = ((drawn.0 - cx).powi(2) + (drawn.1 - cy).powi(2)).sqrt();
             assert!(
-                !css.contains(stroke.as_str()),
-                "{} is ridden and must keep its colour",
-                net.line(*id).name,
+                off < 0.5,
+                "{} is drawn {off:.3} units from its own cell",
+                net.label(*stop),
             );
         }
     }
 
-    // Everything else fades, except where it is drawn in a ridden colour.
-    let spared: Vec<&str> = ridden
-        .iter()
-        .flat_map(|id| net.line(*id).strokes.iter())
-        .map(String::as_str)
-        .collect();
-    for line in net.lines.iter().filter(|l| !ridden.contains(&l.id)) {
+    // The fade must reach every line, so the trace is the only colour left.
+    let css = fade(&net);
+    for line in net.lines.iter().filter(|l| !l.edges.is_empty()) {
         for stroke in &line.strokes {
-            assert!(
-                css.contains(stroke.as_str()) || spared.contains(&stroke.as_str()),
-                "{} stays saturated for no reason",
-                line.name,
-            );
+            assert!(css.contains(stroke.as_str()), "{} stays saturated", line.name);
         }
     }
 }

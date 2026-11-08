@@ -1,21 +1,23 @@
 # Tennessine Metro Designer SVG — structure notes
 
-Reverse-engineered from `muvit-amandleng.svg` (one map, 30 lines, 452 stations).
-Every claim below was checked against the file; the counts are from that map.
+Reverse-engineered from `muvit-amandleng.svg` (one map, 30 lines, 452 stations),
+then confirmed by `headway-core`, which parses it. Every claim below was checked
+against the file; the counts are from that map as re-exported on 2026-11-06.
 
 ## 1. File shape
 
 Single line of XML. `<!--Created for free with Tennessine's Metro Designer…-->`, an
 SVG 1.1 doctype, then `<svg class="metro-map" viewBox="-95,-118,168,184">` with six
-children in paint order:
+children in paint order. **The DOCTYPE must be allowed explicitly** by a strict XML
+parser — roxmltree rejects the file outright without `ParsingOptions::allow_dtd`.
 
 | # | element | contents | role |
 |---|---------|----------|------|
 | 0 | `g` (stroke-width 0.3) | 18 `path` + 9 `text` | background areas (pixel-art blobs, `hsl()` fills) and district codes (`FW1`, `NVY`, `KGJ`, …). Decorative. |
 | 1 | `g` | 38 `path` + 31 `text` | **the key** — "Key to lines". Only place line *names* exist. |
 | 2 | `g` (fill none, linecap square) | *empty* | an unused optional layer. Proof that layer indices are not stable. |
-| 3 | `g` | 712 `path` | **track segments** (620 core + 92 decorative overlays). |
-| 4 | `g` | 916 children | **stations** — 452 × (marker(s) + label `g`). |
+| 3 | `g` | 711 `path` | **track segments** (619 core + 92 decorative overlays). |
+| 4 | `g` | 917 children | **stations** — 453 × (marker(s) + label `g`), over 452 cells. |
 | 5 | `defs` | `xhtml:style` | embedded PT Sans + a `label-icons` icon font. |
 
 Do not address layers by index. Classify by content (see §6, gotcha 3).
@@ -49,17 +51,19 @@ key is the colour→name dictionary. 30 lines in this map, 28 distinct colours.
 712 `path`s, all `fill="none"`, all made only of `M`/`L` — pure polylines.
 Two kinds, distinguished by `stroke-width`:
 
-* **core** (`stroke-width="0.2"`, line colour) — 620 of them.
+* **core** (`stroke-width="0.2"`, line colour) — 619 of them.
 * **overlay** (92) — drawn on top of a core path with a *byte-identical* `d`:
   * `stroke="#fff" stroke-width="0.06"` → tram (double-line look), 62
   * `stroke="white" stroke-width="0.1" stroke-dasharray="0.3 0.2"` → commuter rail, 30
 
-Match overlays to cores by their `d` string.
+Match overlays to cores by their `d` string: for a given `d`, the **widest** stroke
+is the track and the rest are decoration. That rule beats hard-coding `0.2`, which
+is a line-width setting and will differ between maps.
 
 **Each core path is exactly one inter-station segment of exactly one line.** Verified:
-all 620 cores have both endpoints landing on a station cell, and only 2 of the 3509
-interior vertices land on a station cell — both genuine pass-throughs (Line 1 and
-Line 2 run straight through a tram-only stop at `(-27.5, -0.5)`).
+every core has both endpoints landing on a station cell, and only 2 of ~3500 interior
+vertices land on a station cell — both genuine pass-throughs (Line 1 and Line 2 run
+straight through a tram-only stop at `(-27.5, -0.5)`).
 
 > Interior vertices are corner/offset bookkeeping, **not** stops.
 
@@ -67,8 +71,11 @@ Segment length = polyline length in grid units (median 3.0, min 1.0, max 81.1).
 
 ## 5. Layer 4 — stations
 
-A flat run of `marker(s)` followed by one `g` holding the label, 452 times.
-Each station occupies a unique grid cell, so the cell is a usable primary key.
+A flat run of `marker(s)` followed by one `g` holding the label, 453 times for 452
+stations. The cell is the primary key, because **Tennessine can emit the same station
+twice**: `Fika Pelong` appears at indices 352/353 and again at 625/626 with byte-identical
+markup. Merge onto the cell rather than creating a second node, or the copy becomes an
+orphan with no track.
 
 | marker | count | meaning | network degree |
 |--------|-------|---------|----------------|
@@ -99,12 +106,12 @@ in this map are labelled *only* with the tram icon.
 ## 6. Parse recipe (validated on this map)
 
 1. **Nodes** ← layer 4. Position = centroid of the marker(s), snapped to its cell.
-   → 452 nodes, all in distinct cells.
-2. **Edges** ← the 620 core paths of layer 3. Endpoints snapped to cells; both are
+   → 452 nodes in 452 cells, after merging the duplicate marker pair.
+2. **Edges** ← the 619 core paths of layer 3. Endpoints snapped to cells; both are
    guaranteed to be station nodes. Keep the full polyline for drawing and for length.
 3. **Line attribution** ← `(stroke, overlay styles)` looked up in the key.
-   Uniquely resolves 572/620 edges here; the rest is gotcha 1.
-4. **Graph** → one connected component, 452 nodes, 620 edges. Walking each line's
+   Resolves every edge but the 48 tram ones; the rest is gotcha 1.
+4. **Graph** → one connected component, 452 nodes, 619 edges. Walking each line's
    subgraph from a terminus yields its stop sequence: 24 simple paths, 4 cycles
    (Line 12 "Ring 1", Line 15 "Ring 2", AirTrain A, AirTrain B), plus two cases where
    the drawn subgraph is not a bare path or cycle — see gotcha 8.
@@ -130,19 +137,31 @@ in this map are labelled *only* with the tram icon.
    part of the coordinates.
 5. **No scale.** The user must supply a grid-units→km factor before any journey time,
    acceleration or dwell model means anything.
-6. 52 stations carry no label and 2 are labelled only with an icon glyph. They are
+6. A station can be **drawn twice**, identically. Key stations by cell and merge.
+7. 52 stations carry no label and 2 are labelled only with an icon glyph. They are
    real stations and stay in the graph as interchange/through nodes; they are simply
    absent from the search index (not queryable as an origin or destination). Identify
    every station by its cell, never by name.
-7. Up to 3 parallel edges between the same pair of stations (different lines) → the
+8. Up to 3 parallel edges between the same pair of stations (different lines) → the
    routing graph is a **multigraph** keyed by `(line, a, b)`.
-8. **Lines never branch** (Tennessine draws a line as one sequence of cells), so a
+9. **Lines never branch** (Tennessine draws a line as one sequence of cells), so a
    line's drawn subgraph must be coverable by a single walk: within one line's
    subgraph a degree-1 node is a terminus **or a reversal point**, and a degree-3/4
    node is a self-crossing or two same-styled lines meeting — never a junction.
    Branching is **not supported yet**; see §8.
-9. A line may pass through a station cell without stopping. Only path *endpoints*
-   create a stop.
+10. A line may pass through a station cell without stopping. Only path *endpoints*
+    create a stop.
+11. **Nothing in the markup names a line.** No `id`, no `class`, no grouping per
+    line — a path's only handle is its `stroke` attribute, and lines sharing a
+    colour share that handle (§7.1). So re-styling one line in the browser means
+    either a CSS attribute selector on the stroke, which is what `wash::wash_except`
+    does, or rewriting half a megabyte of SVG. Match on the attribute **exactly as
+    written**: `rgb(0, 0, 255)` and `rgb(0,0,255)` are the same colour but different
+    selectors, which is why `Line` keeps both a normalised `colour` and the file's
+    own `strokes`. Usefully, the track carries `fill="none"` and a station's tick
+    carries no `fill` at all, while every filled shape is a background area — so
+    `path[fill="none"][stroke=C], path[stroke=C]:not([fill])` reaches a line's track
+    and its ticks and touches nothing else.
 
 ## 8. Validation and degraded mode
 
@@ -165,20 +184,21 @@ Measured on `muvit-amandleng.svg`:
 |---------|------------------|------------------------|
 | nothing | 1 component, 452 stations | 0 |
 | tram group | 1 component, 412 stations | 40 |
-| tram group + Line 17 | 1 component, 391 stations | 61 |
 
 All 40 stations stranded by excluding the tram group are **unnamed**, so in this map
 the tram exclusion costs nothing that was queryable in the first place.
 
-The two branched cases in this map:
+Only one branched case remains:
 
-* **Line 17** — a one-cell pendant track from `National Development Commission`
-  (-13.5,-2.5) north to `Forward Offices A` (-13.5,-3.5), making NDC degree 3.
-  **Confirmed by the author as a mistake in the map**, not a Tennessine quirk: no
-  special parser rule, just the warning above. With it removed upstream Line 17 is a
-  clean Saburtalo ↔ Xiguan path.
 * **Forward Tram / Forward Tram 2** — the author's intent is *one* tram line, and
-  trams are heavily branched, so it stays branched even once the naming is sorted out.
-  Excluded with a warning for now. (It is also the one style collision in the file:
-  the two legend entries share colour **and** overlay, so the 48 segments could not be
-  attributed per-line even without the branching.)
+  trams are heavily branched, so it stays branched however the naming is resolved.
+  Excluded with a warning. It is also the one style collision in the file: the two
+  legend entries share colour **and** overlay, so its 48 segments could not be
+  attributed per-line even without the branching.
+
+**Line 17** used to branch too: a one-cell pendant track from `National Development
+Commission` (-13.5,-2.5) north to `Forward Offices A` (-13.5,-3.5). The author
+confirmed that as a mistake in the map and removed it; Line 17 now parses as a clean
+33-stop Saburtalo ↔ Xiguan path. It is recorded here because it is the shape a
+mis-drawn line takes, and because removing a line from a corridor **re-slots the
+others**: Line 7 and Commuter C moved from ±0.19 to new offsets when it went.

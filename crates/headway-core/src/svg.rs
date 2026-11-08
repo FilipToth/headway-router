@@ -22,8 +22,11 @@ pub fn view_box(svg: &str) -> Option<ViewBox> {
     if quote != '"' && quote != '\'' {
         return None;
     }
-    let value = rest[1..].split(quote).next()?;
+    parse_view_box(rest[1..].split(quote).next()?)
+}
 
+/// Parses the *value* of a `viewBox` attribute.
+pub fn parse_view_box(value: &str) -> Option<ViewBox> {
     let mut nums = value
         .split(|c: char| c == ',' || c.is_ascii_whitespace())
         .filter(|s| !s.is_empty())

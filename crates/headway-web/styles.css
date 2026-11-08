@@ -93,10 +93,20 @@ body {
 .btn-quiet:hover { background: rgba(127, 127, 160, 0.12); }
 .btn-primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; height: 2.6rem; }
 
-.chip {
+.topleft {
   position: fixed;
   top: 1rem;
   left: 1rem;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: .5rem;
+  width: min(20rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+}
+
+.chip {
   display: flex;
   align-items: center;
   gap: .5rem;
@@ -109,6 +119,7 @@ body {
   backdrop-filter: blur(8px);
 }
 .chip .name {
+  flex: 1;
   font-size: .85rem;
   font-weight: 600;
   white-space: nowrap;
@@ -161,3 +172,124 @@ body {
 .sub { margin: 0 0 1.5rem; color: var(--muted); font-size: .92rem; }
 .error { margin: 1rem 0 0; color: #c0392b; font-size: .85rem; }
 @media (prefers-color-scheme: dark) { .error { color: #ff8f7a; } }
+
+/* ---------- journey planner ---------- */
+
+.planner {
+  display: flex;
+  flex-direction: column;
+  gap: .45rem;
+  /* visible, so a suggestion list can hang outside the panel */
+  overflow: visible;
+  padding: .75rem;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+}
+
+.field { position: relative; }
+
+.picker {
+  width: 100%;
+  height: 2.2rem;
+  padding: 0 .5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: .85rem;
+}
+.picker:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.plan-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: .75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.itinerary {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+  margin-top: .15rem;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.ride {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .45rem .55rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.swatch {
+  flex: none;
+  width: .32rem;
+  height: 1.1rem;
+  border-radius: 2px;
+}
+.ride-line {
+  flex: 1;
+  font-weight: 600;
+  font-size: .85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ride-count {
+  flex: none;
+  color: var(--muted);
+  font-size: .78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.transfer {
+  padding: .1rem 0 .1rem 1.1rem;
+  border-left: 2px dotted var(--line);
+  margin-left: .55rem;
+  color: var(--muted);
+  font-size: .78rem;
+}
+
+.hints {
+  position: absolute;
+  top: calc(100% + .25rem);
+  left: 0;
+  right: 0;
+  z-index: 4;
+  margin: 0;
+  padding: .2rem;
+  list-style: none;
+  max-height: 14rem;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
+}
+.hint {
+  padding: .35rem .5rem;
+  border-radius: 6px;
+  font-size: .85rem;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hint:hover, .hint.active { background: var(--accent); color: var(--accent-ink); }
+.hint.empty { color: var(--muted); cursor: default; }
+.hint.empty:hover { background: transparent; color: var(--muted); }
+
+/* The journey's fade rules ride along with the itinerary, so they come and go
+   with it. The UA stylesheet hides <style>; said out loud here because a
+   stylesheet in the middle of a flex column is otherwise a surprise. */
+.planner > style {
+  display: none;
+}

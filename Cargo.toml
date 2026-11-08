@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/headway-core", "crates/headway-web"]
+members = ["crates/headway-cli", "crates/headway-core", "crates/headway-web"]
 resolver = "2"
 
 [workspace.package]

@@ -1,7 +1,8 @@
-use headway_core::{root_inner, view_box, ViewBox};
-use leptos::ev::{MouseEvent, PointerEvent, WheelEvent};
+use headway_core::{fastest, parse, root_inner, wash_except, Network, StationId, ViewBox};
+use leptos::ev::{KeyboardEvent, MouseEvent, PointerEvent, WheelEvent};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use std::sync::Arc;
 use wasm_bindgen::JsCast;
 use web_sys::{Element, Event, HtmlInputElement};
 
@@ -77,6 +78,25 @@ struct MapDoc {
     /// The contents of the uploaded root `<svg>`, re-parented under ours.
     body: String,
     vb: ViewBox,
+    net: Arc<Network>,
+}
+
+/// One line of an itinerary, already turned into text so the view does no
+/// lookups of its own.
+#[derive(Clone, PartialEq)]
+enum Row {
+    Ride { line: String, colour: String, stations: usize },
+    Transfer { at: String },
+}
+
+#[derive(Clone, PartialEq)]
+struct Plan {
+    rows: Vec<Row>,
+    stations: usize,
+    transfers: usize,
+    /// Rules that fade every line this journey does not use, so the route is
+    /// the only saturated thing left on the map.
+    css: String,
 }
 
 fn window_size() -> (f64, f64) {
@@ -88,6 +108,102 @@ fn window_size() -> (f64, f64) {
     )
 }
 
+/// A station box you type at, with the matches listed under it.
+///
+/// Picking is explicit: typing clears any previous choice, so a half-typed
+/// name can never leave a stale journey on screen.
+#[component]
+fn StationSearch(
+    placeholder: &'static str,
+    net: Arc<Network>,
+    selected: RwSignal<Option<StationId>>,
+) -> impl IntoView {
+    const HINTS: usize = 7;
+
+    let query = RwSignal::new(String::new());
+    let open = RwSignal::new(false);
+    let active = RwSignal::new(0usize);
+
+    let hints = Memo::new(move |_| {
+        let typed = query.get();
+        net.search(&typed, HINTS)
+            .into_iter()
+            .map(|id| (id, net.label(id)))
+            .collect::<Vec<_>>()
+    });
+
+    let choose = move |id: StationId, name: String| {
+        selected.set(Some(id));
+        query.set(name);
+        open.set(false);
+    };
+
+    let on_input = move |ev| {
+        query.set(event_target_value(&ev));
+        selected.set(None);
+        active.set(0);
+        open.set(true);
+    };
+
+    let on_key = move |ev: KeyboardEvent| {
+        let items = hints.get();
+        match ev.key().as_str() {
+            "ArrowDown" => {
+                ev.prevent_default();
+                open.set(true);
+                active.update(|a| *a = (*a + 1).min(items.len().saturating_sub(1)));
+            }
+            "ArrowUp" => {
+                ev.prevent_default();
+                active.update(|a| *a = a.saturating_sub(1));
+            }
+            "Enter" => {
+                if let Some((id, name)) = items.get(active.get()).cloned() {
+                    ev.prevent_default();
+                    choose(id, name);
+                }
+            }
+            "Escape" => open.set(false),
+            _ => {}
+        }
+    };
+
+    view! {
+        <div class="field">
+            <input class="picker" type="text" placeholder=placeholder aria-label=placeholder
+                   autocomplete="off" spellcheck="false"
+                   prop:value=move || query.get()
+                   on:input=on_input
+                   on:keydown=on_key
+                   on:focus=move |_| open.set(true)
+                   on:blur=move |_| open.set(false) />
+
+            <Show when=move || open.get() && !query.with(|q| q.trim().is_empty())>
+                // mousedown is swallowed so the input keeps focus and the
+                // click below still lands
+                <ul class="hints" on:mousedown=|ev: MouseEvent| ev.prevent_default()>
+                    {move || {
+                        let items = hints.get();
+                        if items.is_empty() {
+                            return view! { <li class="hint empty">"no station by that name"</li> }
+                                .into_any();
+                        }
+                        items.into_iter().enumerate().map(|(i, (id, name))| {
+                            let picked = name.clone();
+                            view! {
+                                <li class="hint" class:active=move || active.get() == i
+                                    on:click=move |_| choose(id, picked.clone())>
+                                    {name}
+                                </li>
+                            }
+                        }).collect_view().into_any()
+                    }}
+                </ul>
+            </Show>
+        </div>
+    }
+}
+
 #[component]
 fn App() -> impl IntoView {
     let doc = RwSignal::new(None::<MapDoc>);
@@ -97,6 +213,42 @@ fn App() -> impl IntoView {
     let drag = RwSignal::new(None::<(f64, f64, View)>);
     // The viewBox depends on the window, so the window has to be reactive.
     let size = RwSignal::new(window_size());
+    let origin = RwSignal::new(None::<StationId>);
+    let destination = RwSignal::new(None::<StationId>);
+
+    // Re-planned whenever either end changes.
+    let plan = Memo::new(move |_| -> Option<Result<Plan, String>> {
+        let (Some(from), Some(to)) = (origin.get(), destination.get()) else {
+            return None;
+        };
+        doc.with(|held| {
+            let net = &held.as_ref()?.net;
+            Some(match fastest(net, from, to) {
+                Err(why) => Err(why.to_string()),
+                Ok(journey) => {
+                    let mut rows = Vec::new();
+                    for (i, leg) in journey.legs.iter().enumerate() {
+                        let line = net.line(leg.line);
+                        rows.push(Row::Ride {
+                            line: line.name.clone(),
+                            colour: line.colour.clone(),
+                            stations: leg.stations(),
+                        });
+                        if i + 1 < journey.legs.len() {
+                            rows.push(Row::Transfer { at: net.label(leg.alight()) });
+                        }
+                    }
+                    let ridden: Vec<_> = journey.legs.iter().map(|l| l.line).collect();
+                    Ok(Plan {
+                        rows,
+                        stations: journey.stations(),
+                        transfers: journey.transfers(),
+                        css: wash_except(net, &ridden),
+                    })
+                }
+            })
+        })
+    });
 
     window_event_listener(leptos::ev::resize, move |_| size.set(window_size()));
 
@@ -116,18 +268,27 @@ fn App() -> impl IntoView {
                     return;
                 }
             };
-            let Some((vb, body)) = view_box(&text).zip(root_inner(&text)) else {
-                error.set(Some(format!(
-                    "{name} has no usable root <svg viewBox>, so it is not a Tennessine map export."
-                )));
+            let network = match parse(&text) {
+                Ok(net) => net,
+                Err(problem) => {
+                    error.set(Some(format!("{name} could not be read: {problem}")));
+                    doc.set(None);
+                    return;
+                }
+            };
+            let Some(body) = root_inner(&text) else {
+                error.set(Some(format!("{name} has no root <svg> element.")));
                 doc.set(None);
                 return;
             };
+            let vb = network.view_box;
             let body = body.to_string();
+            origin.set(None);
+            destination.set(None);
             error.set(None);
             size.set(window_size());
             view.set(View::fit(vb, window_size()));
-            doc.set(Some(MapDoc { name, body, vb }));
+            doc.set(Some(MapDoc { name, body, vb, net: Arc::new(network) }));
         });
     };
 
@@ -201,11 +362,56 @@ fn App() -> impl IntoView {
             })}
         </div>
 
+        // Rebuilt per map, which also clears the pickers when one is loaded.
+        {move || doc.get().map(|d| {
+            view! {
+                <div class="topleft">
+                    <div class="chip">
+                        <span class="name">{d.name.clone()}</span>
+                        <label for="svg" class="btn btn-quiet">"Change map"</label>
+                    </div>
+
+                    <div class="planner">
+                        <StationSearch placeholder="From" net=Arc::clone(&d.net) selected=origin />
+                        <StationSearch placeholder="To" net=Arc::clone(&d.net) selected=destination />
+
+                        {move || plan.get().map(|outcome| match outcome {
+                            Err(why) => view! { <p class="plan-note">{why}</p> }.into_any(),
+                            Ok(p) => view! {
+                                // Global, so it reaches the map; mounted with
+                                // the itinerary so it comes and goes with it.
+                                <style>{p.css}</style>
+                                <div class="itinerary">
+                                    <p class="plan-note">{format!(
+                                        "{} station{} · {} transfer{}",
+                                        p.stations, if p.stations == 1 { "" } else { "s" },
+                                        p.transfers, if p.transfers == 1 { "" } else { "s" },
+                                    )}</p>
+                                    {p.rows.into_iter().map(|row| match row {
+                                        Row::Ride { line, colour, stations } => view! {
+                                            <div class="ride">
+                                                <span class="swatch"
+                                                      style=format!("background:{colour}")></span>
+                                                <span class="ride-line">{line}</span>
+                                                <span class="ride-count">{format!(
+                                                    "{stations} station{}",
+                                                    if stations == 1 { "" } else { "s" },
+                                                )}</span>
+                                            </div>
+                                        }.into_any(),
+                                        Row::Transfer { at } => view! {
+                                            <div class="transfer">{format!("transfer at {at}")}</div>
+                                        }.into_any(),
+                                    }).collect_view()}
+                                </div>
+                            }.into_any(),
+                        })}
+                    </div>
+                </div>
+            }
+        })}
+
         <Show when=move || doc.with(Option::is_some)>
-            <div class="chip">
-                <span class="name">{move || doc.with(|d| d.as_ref().map(|d| d.name.clone()))}</span>
-                <label for="svg" class="btn btn-quiet">"Change map"</label>
-            </div>
 
             <div class="controls">
                 <output class="readout">

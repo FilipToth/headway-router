@@ -18,6 +18,8 @@ web-sys = { version = "0.3", features = [
   "Event",
   "EventTarget",
   "File",
+  "FocusEvent",
+  "KeyboardEvent",
   "FileList",
   "HtmlInputElement",
   "MouseEvent",

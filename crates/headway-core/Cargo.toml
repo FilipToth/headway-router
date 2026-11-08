@@ -7,3 +7,4 @@ license.workspace = true
 description = "Parses Tennessine Metro Designer SVG maps into a routable graph"
 
 [dependencies]
+roxmltree = "0.21"

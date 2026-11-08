@@ -5,7 +5,19 @@
 //! for the reverse-engineered format this is built on.
 
 pub mod grid;
+pub mod network;
+pub mod parse;
+pub mod path;
+pub mod route;
+pub mod search;
 pub mod svg;
+pub mod wash;
 
 pub use grid::Cell;
-pub use svg::{root_inner, view_box, ViewBox};
+pub use network::{Edge, EdgeId, Icon, Line, LineId, Marker, Mode, Network, Shape, Station, StationId, Warning};
+pub use parse::{parse, ParseError};
+pub use path::{parse_path, polyline_length, PathError};
+pub use route::{fastest, Journey, Leg, RouteError};
+pub use search::fold;
+pub use svg::{parse_view_box, root_inner, view_box, ViewBox};
+pub use wash::{wash_except, KEPT_PERCENT, WASH};

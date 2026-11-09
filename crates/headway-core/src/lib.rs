@@ -4,6 +4,7 @@
 //! `cargo test` and from the browser alike. See `docs/tennessine-svg-format.md`
 //! for the reverse-engineered format this is built on.
 
+pub mod config;
 pub mod grid;
 pub mod highlight;
 pub mod network;
@@ -17,6 +18,7 @@ pub mod service;
 pub mod svg;
 pub mod timing;
 
+pub use config::{Config, ConfigError};
 pub use grid::Cell;
 pub use highlight::{fade, tag, trace};
 pub use network::{Edge, EdgeId, Icon, Line, LineId, Marker, Mode, Network, Shape, Station, StationId, Warning};

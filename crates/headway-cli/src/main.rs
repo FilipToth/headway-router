@@ -6,11 +6,15 @@
 //!                       [--headway <minutes>] [--walk <seconds>]
 //!                       [--off <category>]...
 //!                       [--reach <station>] [--within <minutes>]
+//!                       [--save <out.headway>]
+//!
+//! The map may be a Tennessine `.svg` or a saved `.headway` file, which also
+//! carries the scale and the service categories it was saved with.
 
 use headway_core::network::{Marker, Shape};
 use headway_core::{
-    fade, options, parse, polyline_length, reach, tag, trace, Choice, Network, Scale, Services,
-    Spread, StationId, Timing,
+    fade, options, parse, polyline_length, reach, tag, trace, Choice, Config, Network, Scale,
+    Services, Spread, StationId, Timing,
 };
 use std::process::ExitCode;
 
@@ -22,7 +26,7 @@ fn main() -> ExitCode {
              [--route <from> <to>] [--find <query>] [--paint] \
              [--profile <units>:<km>,...] [--centre <x>,<y>] [--headway <minutes>] \
              [--walk <seconds>] [--off <category>]... \
-             [--reach <station>] [--within <minutes>]"
+             [--reach <station>] [--within <minutes>] [--save <out.headway>]"
         );
         return ExitCode::from(2);
     }
@@ -35,12 +39,29 @@ fn main() -> ExitCode {
         .and_then(|i| args.get(i + 1))
         .cloned();
 
-    let svg = match std::fs::read_to_string(path) {
+    let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("cannot read {path}: {e}");
             return ExitCode::FAILURE;
         }
+    };
+
+    // Either a bare map or a saved file carrying one, told apart by what is in
+    // it rather than by what it is called.
+    let saved = match Config::is_ours(&raw) {
+        false => None,
+        true => match Config::read(&raw) {
+            Ok(config) => Some(config),
+            Err(e) => {
+                eprintln!("cannot read {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let svg = match &saved {
+        Some(config) => config.svg.clone(),
+        None => raw,
     };
 
     let net = match parse(&svg) {
@@ -74,8 +95,8 @@ fn main() -> ExitCode {
             .and_then(|i| args.get(i + 1))
             .and_then(|raw| raw.parse::<f64>().ok())
             .unwrap_or(30.0);
-        let measure = scale(&net, &args);
-        let services = seeded(&net, &args);
+        let measure = scale(&net, saved.as_ref(), &args);
+        let services = seeded(&net, saved.as_ref(), &args);
         let timing = Timing::new(&net, &measure, &services);
         return reach(&timing, from, minutes, want("--paint"));
     }
@@ -85,10 +106,34 @@ fn main() -> ExitCode {
             eprintln!("--route needs two station names");
             return ExitCode::from(2);
         };
-        let measure = scale(&net, &args);
-        let services = seeded(&net, &args);
+        let measure = scale(&net, saved.as_ref(), &args);
+        let services = seeded(&net, saved.as_ref(), &args);
         let timing = Timing::new(&net, &measure, &services);
         return route(&timing, &measure, &services, from, to, want("--paint"));
+    }
+
+    if let Some(i) = args.iter().position(|a| a == "--save") {
+        let Some(out) = args.get(i + 1) else {
+            eprintln!("--save needs somewhere to write");
+            return ExitCode::from(2);
+        };
+        let measure = scale(&net, saved.as_ref(), &args);
+        let services = seeded(&net, saved.as_ref(), &args);
+        let name = match &saved {
+            Some(config) => config.name.clone(),
+            None => std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string()),
+        };
+        let axis = saved.as_ref().and_then(|config| config.axis);
+        let text = Config::of(&name, &svg, &measure, axis, &services, &net).write();
+        if let Err(e) = std::fs::write(out, &text) {
+            eprintln!("cannot write {out}: {e}");
+            return ExitCode::FAILURE;
+        }
+        println!("wrote {out}  ({} bytes, {} of them the map)", text.len(), svg.len());
+        return ExitCode::SUCCESS;
     }
 
     summary(&net, path);
@@ -110,8 +155,11 @@ fn main() -> ExitCode {
 /// centre, and `--centre -3.5,12` moves the centre they are measured from.
 /// Without them the map gets the default profile: centred on its stations,
 /// worth little per unit in the middle and several times that at the rim.
-fn scale(net: &Network, args: &[String]) -> Scale {
-    let mut base = Scale::for_network(net);
+fn scale(net: &Network, saved: Option<&Config>, args: &[String]) -> Scale {
+    let mut base = match saved {
+        Some(config) => config.scale.clone(),
+        None => Scale::for_network(net),
+    };
     if let Some(spec) = args.iter().position(|a| a == "--centre").and_then(|i| args.get(i + 1)) {
         match spec.split_once(',').and_then(|(x, y)| {
             Some((x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?))
@@ -144,8 +192,17 @@ fn scale(net: &Network, args: &[String]) -> Scale {
 ///
 /// `--off tram`, repeatable, is the routing panel's switches: it takes a
 /// category out of the routing and leaves everything about it otherwise alone.
-fn seeded(net: &Network, args: &[String]) -> Services {
-    let mut services = Services::for_network(net);
+fn seeded(net: &Network, saved: Option<&Config>, args: &[String]) -> Services {
+    let mut services = match saved {
+        Some(config) => {
+            let (services, notes) = config.services(net);
+            for note in notes {
+                eprintln!("note: {note}");
+            }
+            services
+        }
+        None => Services::for_network(net),
+    };
     let number = |flag: &str| {
         args.iter()
             .position(|a| a == flag)

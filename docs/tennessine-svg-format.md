@@ -187,6 +187,13 @@ in this map are labelled *only* with the tram icon.
    frontier from the arrival instead gives every line through a junction a free
    change and draws banded track past stations the limit does not include —
    which is why the per-line arrivals are kept and not just the best one.
+   None of that work is in the map, and none of it can be reconstructed from
+   one, so `config::Config` saves the map *and* the settings as a single file:
+   a text header of profile, categories and switches, then the SVG verbatim
+   after an `svg` line. The map travels inside it because a profile is measured
+   in that map's grid units from a point in that map's coordinates and a
+   category holds lines by their place in that map's legend — the two halves
+   are one thing, and splitting them would only invite them apart.
 6. A station can be **drawn twice**, identically. Key stations by cell and merge.
 7. 52 stations carry no label and 2 are labelled only with an icon glyph. They are
    real stations and stay in the graph as interchange/through nodes; they are simply

@@ -207,6 +207,17 @@ body {
 .card h1 { margin: 0 0 .3rem; font-size: 1.35rem; letter-spacing: -0.01em; }
 .sub { margin: 0 0 1.5rem; color: var(--muted); font-size: .92rem; }
 .error { margin: 1rem 0 0; color: #c0392b; font-size: .85rem; }
+/* The same words over the map rather than on the welcome card, where they need
+   a surface of their own to be read against. */
+.topleft > .error, .topleft > .plan-note {
+  margin: 0;
+  padding: .4rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+}
 @media (prefers-color-scheme: dark) { .error { color: #ff8f7a; } }
 
 /* ---------- journey planner ---------- */

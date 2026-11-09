@@ -6,8 +6,8 @@
 
 use headway_core::network::Shape;
 use headway_core::{
-    fade, fastest, options, parse, reach, root_inner_range, trace, Cell, Network, Scale, Services,
-    Spread, Timing,
+    fade, fastest, options, parse, reach, root_inner_range, trace, Cell, Config, Network, Scale,
+    Services, Spread, Timing,
 };
 
 fn real_map() -> Option<Network> {
@@ -331,6 +331,58 @@ fn a_fresh_map_sorts_its_lines_by_how_they_are_drawn() {
     let default = &services.categories()[0];
     assert!(services.lines_in(0).len() * 2 > net.lines.len(), "the default holds most of them");
     assert!(default.run_time(1.0) > 0.0 && default.run_time(1.0) < 600.0);
+}
+
+#[test]
+fn a_real_map_and_its_settings_survive_a_saved_file() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../muvit-amandleng.svg");
+    let Ok(svg) = std::fs::read_to_string(path) else {
+        eprintln!("skipping: no map at the workspace root");
+        return;
+    };
+    let net = parse(&svg).expect("the real map parses");
+
+    // Settings nothing like the defaults, so a round trip that fell back to
+    // them could not pass.
+    let scale = Scale::from_points((-8.0, -14.0), vec![(20.0, 6.0), (120.0, 70.0)]);
+    let mut services = Services::for_network(&net);
+    for at in 0..services.categories().len() {
+        services.set_headway(at, 3.0);
+    }
+    services.rename(0, "Underground");
+    services.set_allowed(services.categories().len() - 1, false);
+    services.set_walk(90.0);
+    let busy = net.lines[2].id;
+    services.set_own_headway(busy, Some(1.5));
+
+    let written = Config::of("muvit-amandleng.svg", &svg, &scale, Some(150.0), &services, &net)
+        .write();
+    let read = Config::read(&written).expect("our own file reads");
+    assert_eq!(read.svg, svg, "half a megabyte of map, byte for byte");
+    assert_eq!(read.scale, scale);
+    assert_eq!(read.axis, Some(150.0));
+    assert_eq!(read.name, "muvit-amandleng.svg");
+
+    // The map in the file parses to the same map — parsing is deterministic,
+    // which is what lets a category hold its lines by index at all.
+    let again = parse(&read.svg).expect("the saved map parses");
+    assert_eq!(again.lines.len(), net.lines.len());
+    assert_eq!(again.stations.len(), net.stations.len());
+    let (back, notes) = read.services(&again);
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(back, services, "every category, every line, the switches and the walk");
+
+    // And a journey planned from the file is the journey planned before it.
+    let from = net.station_named("Zamalek").expect("Zamalek is on the map");
+    let to = net.station_named("Xiguan").expect("Xiguan is on the map");
+    let before = fastest(&Timing::new(&net, &scale, &services), from, to).expect("a route");
+    let after = fastest(&Timing::new(&again, &read.scale, &back), from, to).expect("a route");
+    assert!((before.seconds - after.seconds).abs() < 1e-9, "{} vs {}", before.seconds, after.seconds);
+    assert_eq!(before.legs, after.legs);
+
+    // Saving what was loaded gives the same file back, so no save drifts.
+    let twice = Config::of(&read.name, &read.svg, &read.scale, read.axis, &back, &again).write();
+    assert_eq!(written, twice);
 }
 
 #[test]

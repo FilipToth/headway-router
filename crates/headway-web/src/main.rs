@@ -3,8 +3,8 @@ use headway_core::service::{
 };
 use headway_core::reach::{self, BAND_INK, BANDS};
 use headway_core::{
-    fade, options, parse, root_inner_range, tag, trace, Category, Choice, LineId, Network, Scale,
-    Services, Spread, StationId, Timing, ViewBox,
+    config, fade, options, parse, root_inner_range, tag, trace, Category, Choice, Config, LineId,
+    Network, Scale, Services, Spread, StationId, Timing, ViewBox,
 };
 use leptos::ev::{DragEvent, KeyboardEvent, MouseEvent, PointerEvent, WheelEvent};
 use leptos::prelude::*;
@@ -92,6 +92,10 @@ impl View {
 #[derive(Clone)]
 struct MapDoc {
     name: String,
+    /// The file as it arrived, byte for byte, because that is what gets saved
+    /// again. Reassembling it from the halves below would mean writing a root
+    /// `<svg>` tag of our own and losing whatever the author put on theirs.
+    svg: String,
     /// The uploaded root `<svg>`'s contents, re-parented under ours and cut in
     /// two at the station layer so a journey can be drawn between the halves:
     /// over the track it rides, under the markers and labels that name it.
@@ -247,6 +251,38 @@ fn routing(
         colours,
         trace: trace(net, journey),
         tags: tag(&hops, &texts),
+    }
+}
+
+/// Hands the browser a file to save.
+///
+/// There is no other way: a page cannot write to disk, so the file is built in
+/// memory, handed to the browser as a blob, and a link to it is clicked on the
+/// user's behalf. The object URL is left alive deliberately — revoking it in
+/// the same breath as the click races the download in some browsers, and the
+/// page is holding the same bytes anyway.
+fn download(name: &str, text: &str) -> Option<()> {
+    let parts = js_sys::Array::new();
+    parts.push(&wasm_bindgen::JsValue::from_str(text));
+    let blob = web_sys::Blob::new_with_str_sequence(&parts).ok()?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).ok()?;
+    let link = web_sys::window()?
+        .document()?
+        .create_element("a")
+        .ok()?
+        .dyn_into::<web_sys::HtmlAnchorElement>()
+        .ok()?;
+    link.set_href(&url);
+    link.set_download(name);
+    link.click();
+    Some(())
+}
+
+/// A file name without its extension, for naming the saved file after the map.
+fn stem(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((before, _)) if !before.is_empty() => before,
+        _ => name,
     }
 }
 
@@ -1114,6 +1150,9 @@ fn ServicePanel(
 fn App() -> impl IntoView {
     let doc = RwSignal::new(None::<MapDoc>);
     let error = RwSignal::new(None::<String>);
+    // What a file said that could not be used as written — not a failure, but
+    // not something to swallow either.
+    let notice = RwSignal::new(None::<String>);
     let view = RwSignal::new(View { cam_x: 0.0, cam_y: 0.0, zoom: 10.0 });
     // Some((pointer x, pointer y, view when the drag started))
     let drag = RwSignal::new(None::<(f64, f64, View)>);
@@ -1256,6 +1295,80 @@ fn App() -> impl IntoView {
 
     window_event_listener(leptos::ev::resize, move |_| size.set(window_size()));
 
+    // One way in for a map, whether it arrived as a bare SVG or inside a saved
+    // file, so the two can never drift about how a map is set up.
+    let adopt = move |name: String, svg: String, saved: Option<Config>| {
+        let network = match parse(&svg) {
+            Ok(net) => net,
+            Err(problem) => {
+                error.set(Some(format!("{name} could not be read: {problem}")));
+                doc.set(None);
+                return;
+            }
+        };
+        let Some(body) = root_inner_range(&svg) else {
+            error.set(Some(format!("{name} has no root <svg> element.")));
+            doc.set(None);
+            return;
+        };
+        // Clamped because the offset comes from the parser and the range from a
+        // scan of the same text: a mismatch should mis-stack the route layer,
+        // never panic on a slice.
+        let cut = network.station_layer_at.clamp(body.start, body.end);
+        let (under, over) = (svg[body.start..cut].to_string(), svg[cut..body.end].to_string());
+        let vb = network.view_box;
+
+        match saved {
+            // A map on its own gets the settings a map starts with.
+            None => {
+                start_scale(&network, scale, y_max);
+                services.set(Services::for_network(&network));
+                notice.set(None);
+            }
+            Some(config) => {
+                let (kept, notes) = config.services(&network);
+                // A file saved without an axis — by the command line, say —
+                // gets its graph framed now.
+                let axis = config.axis.unwrap_or_else(|| {
+                    axis_ceiling(config.scale.points().last().map_or(10.0, |p| p.1) * 1.3)
+                });
+                scale.set(config.scale);
+                y_max.set(axis);
+                services.set(kept);
+                notice.set((!notes.is_empty()).then(|| notes.join(" · ")));
+            }
+        }
+
+        origin.set(None);
+        destination.set(None);
+        focus.set(None);
+        chosen.set(0);
+        error.set(None);
+        size.set(window_size());
+        view.set(View::fit(vb, window_size()));
+        doc.set(Some(MapDoc { name, svg, under, over, vb, net: Arc::new(network) }));
+    };
+
+    // Everything decided about this map, in one file, named after the map.
+    let keep = move || {
+        let Some(held) = doc.get_untracked() else {
+            return;
+        };
+        let text = Config::of(
+            &held.name,
+            &held.svg,
+            &scale.get_untracked(),
+            Some(y_max.get_untracked()),
+            &services.get_untracked(),
+            &held.net,
+        )
+        .write();
+        let file = format!("{}.{}", stem(&held.name), config::EXTENSION);
+        if download(&file, &text).is_none() {
+            error.set(Some("This browser would not take the file.".into()));
+        }
+    };
+
     let on_file = move |ev: Event| {
         let Some(input) = ev.target().and_then(|t| t.dyn_into::<HtmlInputElement>().ok()) else {
             return;
@@ -1272,34 +1385,28 @@ fn App() -> impl IntoView {
                     return;
                 }
             };
-            let network = match parse(&text) {
-                Ok(net) => net,
-                Err(problem) => {
-                    error.set(Some(format!("{name} could not be read: {problem}")));
-                    doc.set(None);
-                    return;
-                }
-            };
-            let Some(body) = root_inner_range(&text) else {
-                error.set(Some(format!("{name} has no root <svg> element.")));
-                doc.set(None);
+            // A saved file says so on its first line; anything else is taken
+            // for a map, and the parser has the last word either way.
+            if !Config::is_ours(&text) {
+                adopt(name, text, None);
                 return;
-            };
-            // Clamped because the offset comes from the parser and the range
-            // from a scan of the same text: a mismatch should mis-stack the
-            // route layer, never panic on a slice.
-            let cut = network.station_layer_at.clamp(body.start, body.end);
-            let (under, over) = (text[body.start..cut].to_string(), text[cut..body.end].to_string());
-            let vb = network.view_box;
-            start_scale(&network, scale, y_max);
-            services.set(Services::for_network(&network));
-            origin.set(None);
-            destination.set(None);
-            focus.set(None);
-            error.set(None);
-            size.set(window_size());
-            view.set(View::fit(vb, window_size()));
-            doc.set(Some(MapDoc { name, under, over, vb, net: Arc::new(network) }));
+            }
+            match Config::read(&text) {
+                Err(why) => {
+                    error.set(Some(format!("{name} could not be read: {why}")));
+                    doc.set(None);
+                }
+                Ok(config) => {
+                    // The name the file remembers, which is the map's, not
+                    // whatever the saved file has since been renamed to.
+                    let shown = match config.name.trim().is_empty() {
+                        true => name,
+                        false => config.name.clone(),
+                    };
+                    let svg = config.svg.clone();
+                    adopt(shown, svg, Some(config));
+                }
+            }
         });
     };
 
@@ -1401,7 +1508,8 @@ fn App() -> impl IntoView {
 
     view! {
         // One hidden input, driven by <label for> buttons wherever we need one.
-        <input id="svg" class="file-input" type="file" accept=".svg,image/svg+xml"
+        <input id="svg" class="file-input" type="file"
+               accept=".svg,.headway,image/svg+xml,text/plain"
                on:change=on_file />
 
         <div class="viewport" class:picking=move || mode.get() == Mode::Spread
@@ -1506,8 +1614,21 @@ fn App() -> impl IntoView {
 
                     <div class="chip">
                         <span class="name">{d.name.clone()}</span>
-                        <label for="svg" class="btn btn-quiet">"Change map"</label>
+                        <button class="btn btn-quiet"
+                                title="Save the map and everything set on it as one file"
+                                on:click=move |_| keep()>"Save"</button>
+                        <label for="svg" class="btn btn-quiet"
+                               title="Open another map, or a saved file">"Open"</label>
                     </div>
+
+                    // Said out loud because a file that was read but not
+                    // entirely understood is worth knowing about, and because
+                    // the welcome card it used to be reported on is gone by
+                    // the time a second file is opened.
+                    {move || error.get().map(|why| view! { <p class="error">{why}</p> })}
+                    {move || notice.get().map(|note| view! {
+                        <p class="plan-note">{note}</p>
+                    })}
 
                     // Both panels stay mounted, one of them hidden, so that
                     // switching across and back does not empty the boxes.
@@ -1747,7 +1868,9 @@ fn App() -> impl IntoView {
                     <p class="sub">
                         "Routing for fantasy metro maps drawn in Tennessine's Metro Designer."
                     </p>
-                    <label for="svg" class="btn btn-primary">"Open a map (.svg)"</label>
+                    <label for="svg" class="btn btn-primary">
+                        "Open a map (.svg) or a saved file"
+                    </label>
                     {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
                 </div>
             </div>
@@ -1879,6 +2002,17 @@ mod tests {
         assert_eq!(axis_step(100.0, true), 150.0);
         assert_eq!(axis_step(150.0, false), 100.0);
         assert_eq!(axis_step(50.0, false), 25.0);
+    }
+
+    #[test]
+    fn a_saved_file_is_named_after_the_map_not_the_file_it_came_in() {
+        assert_eq!(stem("muvit-amandleng.svg"), "muvit-amandleng");
+        assert_eq!(stem("muvit-amandleng.headway"), "muvit-amandleng");
+        assert_eq!(stem("map.v2.svg"), "map.v2");
+        assert_eq!(stem("noextension"), "noextension");
+        // Nothing in front of the dot is not an extension.
+        assert_eq!(stem(".svg"), ".svg");
+        assert_eq!(stem(""), "");
     }
 
     #[test]

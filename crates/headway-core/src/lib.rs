@@ -21,7 +21,7 @@ pub use highlight::{fade, tag, trace};
 pub use network::{Edge, EdgeId, Icon, Line, LineId, Marker, Mode, Network, Shape, Station, StationId, Warning};
 pub use parse::{parse, ParseError};
 pub use path::{parse_path, polyline_length, PathError};
-pub use route::{fastest, Journey, Leg, RouteError};
+pub use route::{fastest, options, Choice, Journey, Leg, Merit, RouteError};
 pub use scale::Scale;
 pub use search::fold;
 pub use service::{Category, Services};

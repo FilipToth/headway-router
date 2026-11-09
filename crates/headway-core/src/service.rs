@@ -20,6 +20,12 @@
 //! every three minutes and one every twelve, are the same category in every
 //! way but the wait. What that wait costs is [`crate::timing`]'s business.
 //!
+//! Whether a category may be ridden at all is kept here too
+//! ([`Services::allows`]), even though it is switched on and off in the
+//! routing panel rather than in the service settings. "How fast is a tram?" is
+//! a question about the map; "can I get there without taking one?" is a
+//! question about one journey, and the answer belongs next to the journey.
+//!
 //! Two figures here are the journey's rather than any one line's — the walk
 //! across an interchange ([`Services::walk`]) and, still fixed,
 //! [`crate::timing::DWELL`]. The walk is kept with the categories because that
@@ -107,6 +113,10 @@ pub struct Services {
     categories: Vec<Category>,
     /// Which category each line is in, by line index.
     assigned: Vec<usize>,
+    /// Whether the planner may use each category, by category index. Kept
+    /// beside the categories so that adding, removing and reordering can
+    /// never leave a flag pointing at the wrong one.
+    allowed: Vec<bool>,
     /// A line's own headway in minutes where it differs from its category's,
     /// by line index.
     own_headway: Vec<Option<f64>>,
@@ -128,6 +138,7 @@ impl Services {
         Self {
             categories: vec![from_mode(name, like)],
             assigned: vec![0; lines],
+            allowed: vec![true],
             own_headway: vec![None; lines],
             walk: DEFAULT_WALK,
         }
@@ -156,8 +167,7 @@ impl Services {
         };
         let mut services = Self::fresh(net.lines.len(), name_of(default), default);
         for &(mode, _) in counts.iter().skip(1) {
-            let at = services.categories.len();
-            services.categories.push(from_mode(name_of(mode), mode));
+            let at = services.push(from_mode(name_of(mode), mode));
             for line in net.lines.iter().filter(|l| l.mode == mode) {
                 services.assign(line.id, at);
             }
@@ -205,7 +215,14 @@ impl Services {
     pub fn add(&mut self, name: &str) -> usize {
         let mut fresh = self.categories[0].clone();
         fresh.name = trimmed(name);
-        self.categories.push(fresh);
+        self.push(fresh)
+    }
+
+    /// Appends a category, switched on, and returns where it landed. The one
+    /// place that grows the list, so the flags beside it cannot fall behind.
+    fn push(&mut self, category: Category) -> usize {
+        self.categories.push(category);
+        self.allowed.push(true);
         self.categories.len() - 1
     }
 
@@ -224,6 +241,7 @@ impl Services {
             return;
         }
         self.categories.remove(category);
+        self.allowed.remove(category);
         for at in &mut self.assigned {
             match (*at).cmp(&category) {
                 std::cmp::Ordering::Equal => *at = 0,
@@ -255,6 +273,26 @@ impl Services {
         if let Some(c) = self.categories.get_mut(category) {
             c.headway = sane(minutes, MIN_HEADWAY, MAX_HEADWAY, c.headway);
         }
+    }
+
+    /// Whether the planner may ride the lines in a category.
+    ///
+    /// A category that is not there reads as off: there is nothing in it to
+    /// ride, and a stale index should narrow a search rather than widen it.
+    pub fn allows(&self, category: usize) -> bool {
+        self.allowed.get(category).copied().unwrap_or(false)
+    }
+
+    pub fn set_allowed(&mut self, category: usize, may: bool) {
+        if let Some(slot) = self.allowed.get_mut(category) {
+            *slot = may;
+        }
+    }
+
+    /// Whether the planner may ride a line, which is whether its category is
+    /// switched on.
+    pub fn can_ride(&self, line: LineId) -> bool {
+        self.allows(self.category_of(line))
     }
 
     /// Minutes between services on a line: its own figure if it has one, its
@@ -467,6 +505,57 @@ mod tests {
         assert_eq!(s.walk(), 0.0, "a cross-platform change is a real thing");
         s.set_walk(f64::NAN);
         assert_eq!(s.walk(), 0.0, "and nonsense leaves what was there");
+    }
+
+    #[test]
+    fn a_category_can_be_switched_out_of_the_routing() {
+        let mut s = services();
+        let rail = s.add("Commuter rail");
+        s.assign(LineId(4), rail);
+        assert!(s.allows(0) && s.allows(rail), "everything is on to begin with");
+
+        s.set_allowed(rail, false);
+        assert!(!s.allows(rail));
+        assert!(!s.can_ride(LineId(4)), "its lines go with it");
+        assert!(s.can_ride(LineId(0)), "and nothing else does");
+
+        // Switching the last one off is allowed: it is a state the routing
+        // panel can be left in, and it has to be reported, not prevented.
+        s.set_allowed(0, false);
+        assert!(!s.allows(0) && !s.allows(rail), "nothing left to ride");
+        s.set_allowed(0, true);
+        assert!(s.allows(0));
+
+        // A category that is not there cannot be switched either way.
+        s.set_allowed(97, false);
+        assert_eq!(s.categories().len(), 2);
+        assert!(!s.allows(97), "and reads as off");
+    }
+
+    #[test]
+    fn the_switches_follow_their_categories_when_one_is_removed() {
+        // The flags live in a list beside the categories, so a removal in the
+        // middle is exactly where they could come adrift.
+        let mut s = services();
+        let (tram, rail) = (s.add("Tram"), s.add("Commuter rail"));
+        s.assign(LineId(1), tram);
+        s.assign(LineId(2), rail);
+        s.set_allowed(rail, false);
+
+        s.remove(tram);
+        assert_eq!(s.categories()[1].name, "Commuter rail");
+        assert!(!s.allows(1), "still the switch of the category it was set on");
+        assert!(!s.can_ride(LineId(2)));
+        assert!(s.can_ride(LineId(1)), "a line sent back to the default rides again");
+        assert!(!s.allows(2), "and nothing is left behind the end of the list");
+    }
+
+    #[test]
+    fn a_new_category_is_one_the_planner_may_use() {
+        let mut s = services();
+        s.set_allowed(0, false);
+        let next = s.add("High speed metro");
+        assert!(s.allows(next), "a category nobody could ride would be a trap");
     }
 
     #[test]

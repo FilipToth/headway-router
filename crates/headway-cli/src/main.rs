@@ -4,10 +4,11 @@
 //!                       [--route <from> <to>] [--find <query>] [--paint]
 //!                       [--profile <units>:<km>,...] [--centre <x>,<y>]
 //!                       [--headway <minutes>] [--walk <seconds>]
+//!                       [--off <category>]...
 
 use headway_core::network::{Marker, Shape};
 use headway_core::{
-    fade, fastest, parse, tag, trace, Network, Scale, Services, StationId, Timing,
+    fade, options, parse, tag, trace, Choice, Network, Scale, Services, StationId, Timing,
 };
 use std::process::ExitCode;
 
@@ -17,7 +18,8 @@ fn main() -> ExitCode {
         eprintln!(
             "usage: headway <map.svg> [--lines] [--stations] [--warnings] [--line <name>] \
              [--route <from> <to>] [--find <query>] [--paint] \
-             [--profile <units>:<km>,...] [--centre <x>,<y>] [--headway <minutes>] [--walk <seconds>]"
+             [--profile <units>:<km>,...] [--centre <x>,<y>] [--headway <minutes>] \
+             [--walk <seconds>] [--off <category>]..."
         );
         return ExitCode::from(2);
     }
@@ -119,6 +121,9 @@ fn scale(net: &Network, args: &[String]) -> Scale {
 /// The map's service categories, with `--headway 12` putting every one of
 /// them on a twelve minute service and `--walk 90` lengthening the change —
 /// enough to see what frequency does to a route without a browser.
+///
+/// `--off tram`, repeatable, is the routing panel's switches: it takes a
+/// category out of the routing and leaves everything about it otherwise alone.
 fn seeded(net: &Network, args: &[String]) -> Services {
     let mut services = Services::for_network(net);
     let number = |flag: &str| {
@@ -134,6 +139,24 @@ fn seeded(net: &Network, args: &[String]) -> Services {
     }
     if let Some(seconds) = number("--walk") {
         services.set_walk(seconds);
+    }
+    // Matched by name the way --line is, since the categories are named after
+    // the drawing and nobody should have to count them to switch one off.
+    for (i, arg) in args.iter().enumerate() {
+        if arg != "--off" {
+            continue;
+        }
+        let Some(want) = args.get(i + 1) else {
+            eprintln!("--off needs the name of a category");
+            continue;
+        };
+        let needle = want.to_lowercase();
+        let found = (0..services.categories().len())
+            .find(|at| services.categories()[*at].name.to_lowercase().contains(&needle));
+        match found {
+            Some(at) => services.set_allowed(at, false),
+            None => eprintln!("no category matching {want:?}; nothing switched off"),
+        }
     }
     services
 }
@@ -337,20 +360,22 @@ fn route(
         }
     };
     println!("{}  ->  {}", net.label(from), net.label(to));
-    match fastest(timing, from, to) {
+    let off: Vec<&str> = services
+        .categories()
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| !services.allows(*at))
+        .map(|(_, c)| c.name.as_str())
+        .collect();
+    if !off.is_empty() {
+        println!("  not routing over {}", off.join(", "));
+    }
+    match options(timing, from, to) {
         Err(why) => {
             println!("  {why}");
             ExitCode::FAILURE
         }
-        Ok(journey) => {
-            println!(
-                "  {} stations, {} transfer(s), {:.1} units of track, {:.1} km, {}",
-                journey.stations(),
-                journey.transfers(),
-                journey.distance(net),
-                scale.journey_km(net, &journey),
-                clock(journey.seconds),
-            );
+        Ok(picks) => {
             println!(
                 "  measured from ({}, {}) at {:.2} km/unit in the centre, {:.2} at the edge",
                 scale.centre.0,
@@ -364,31 +389,23 @@ fn route(
                 timing.dwell,
                 clock(timing.walk),
             );
-            println!();
-            for (i, leg) in journey.legs.iter().enumerate() {
-                println!(
-                    "    {:<30}{:>3} station{}{:>9.1} km{:>8}  {}",
-                    truncate(&net.line(leg.line).name, 29),
-                    leg.stations(),
-                    if leg.stations() == 1 { "" } else { "s" },
-                    scale.leg_km(net, leg),
-                    clock(timing.leg(leg)),
-                    every(services.headway_of(leg.line)),
-                );
-                if let Some(next) = journey.legs.get(i + 1) {
-                    println!(
-                        "    transfer at {:<26}{} walk + {} wait{:>8}",
-                        truncate(&net.label(leg.alight()), 25),
-                        clock(timing.walk),
-                        clock(timing.wait(next.line)),
-                        clock(timing.boarding(next.line)),
-                    );
-                }
+            println!(
+                "  {} way{} worth offering:",
+                picks.len(),
+                if picks.len() == 1 { "" } else { "s" },
+            );
+            for (n, pick) in picks.iter().enumerate() {
+                println!();
+                option(timing, scale, services, n + 1, pick);
             }
+            let journey = &picks[0].journey;
+            // Only the quickest is painted: the browser draws whichever card
+            // is picked, and one layer is what there is to check here.
             if paint {
-                // Exactly what the web app lays over the map for this journey.
+                // Exactly what the web app lays over the map for the option it
+                // is showing, which is the quickest until another is picked.
                 let sheet = fade(net);
-                let drawn = trace(net, &journey);
+                let drawn = trace(net, journey);
                 println!();
                 println!("  {} colour(s) fade:", sheet.lines().count());
                 print!("{sheet}");
@@ -416,6 +433,40 @@ fn route(
                 }
             }
             ExitCode::SUCCESS
+        }
+    }
+}
+
+/// One of the journeys on offer, under what makes it worth offering.
+fn option(timing: &Timing, scale: &Scale, services: &Services, n: usize, pick: &Choice) {
+    let net = timing.net();
+    let journey = &pick.journey;
+    println!(
+        "  [{n}] {:<22}{:>8}  {} stations, {} change(s), {:.1} km",
+        pick.merit.label(net),
+        clock(journey.seconds),
+        journey.stations(),
+        journey.transfers(),
+        scale.journey_km(net, journey),
+    );
+    for (i, leg) in journey.legs.iter().enumerate() {
+        println!(
+            "      {:<28}{:>3} station{}{:>9.1} km{:>8}  {}",
+            truncate(&net.line(leg.line).name, 27),
+            leg.stations(),
+            if leg.stations() == 1 { "" } else { "s" },
+            scale.leg_km(net, leg),
+            clock(timing.leg(leg)),
+            every(services.headway_of(leg.line)),
+        );
+        if let Some(next) = journey.legs.get(i + 1) {
+            println!(
+                "      transfer at {:<24}{} walk + {} wait{:>8}",
+                truncate(&net.label(leg.alight()), 23),
+                clock(timing.walk),
+                clock(timing.wait(next.line)),
+                clock(timing.boarding(next.line)),
+            );
         }
     }
 }

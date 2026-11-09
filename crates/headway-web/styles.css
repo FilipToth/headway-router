@@ -205,12 +205,119 @@ body {
 }
 .picker:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+/* Which kinds of service the planner may use: one switch per category, in the
+   routing panel because it is a question about the journey. A switch that is
+   off keeps its place and its dot — it is a thing to switch back on, not a
+   thing that has gone away. */
+.modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem;
+}
+.mode {
+  display: inline-flex;
+  align-items: center;
+  gap: .32rem;
+  max-width: 100%;
+  padding: .2rem .5rem .2rem .4rem;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--ink);
+  font: inherit;
+  font-size: .74rem;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mode-dot {
+  flex: none;
+  width: .48rem;
+  height: .48rem;
+  border-radius: 50%;
+}
+.mode.off {
+  border-style: dashed;
+  border-color: var(--line);
+  background: transparent;
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.mode.off .mode-dot { opacity: .3; }
+.mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mode:active { transform: translateY(1px); }
+
 .plan-note {
   margin: 0;
   color: var(--muted);
   font-size: .75rem;
   font-variant-numeric: tabular-nums;
 }
+
+/* The ways of making this journey, one row each, quickest at the top. Only
+   drawn when there is more than one: a list of one is not a choice. The row is
+   a button so that picking is a tap or a keypress, not a drag. */
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+  margin-top: .15rem;
+}
+.choice {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .35rem .5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.choice:hover { border-color: var(--accent); }
+.choice.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.choice-time {
+  flex: none;
+  width: 3.4rem;
+  font-size: .9rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.choice-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: .05rem;
+}
+.choice-label {
+  font-size: .78rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.choice.on .choice-label { color: var(--accent); }
+.choice-sub {
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  color: var(--muted);
+  font-size: .68rem;
+}
+/* The lines ridden, in order: enough to tell two routes apart at a glance. */
+.choice-lines { display: inline-flex; gap: .1rem; }
+.choice-bar { width: .5rem; height: .3rem; border-radius: 1px; }
 
 .itinerary {
   display: flex;

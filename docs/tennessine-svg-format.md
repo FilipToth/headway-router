@@ -164,6 +164,15 @@ in this map are labelled *only* with the tram icon.
    Journey *times* are this plus `service::Services` (what each line is and how
    fast it runs), put together in `timing::Timing` — which the planner then
    searches on, so the route it picks and the time it shows come from one model.
+   A category can also be switched off (`Services::allows`), which takes its
+   lines out of the search while leaving everything else about them alone. That
+   switch lives in the routing panel rather than the service settings: it is a
+   question about one journey, not about what a tram is.
+   One answer is rarely the whole answer, so `route::options` puts the same
+   model to a few different questions — quickest, fewest changes, and the
+   quickest way round each line the best answer leans on — and offers whichever
+   replies turn out to be genuinely different journeys, each labelled with the
+   question it answers. Nothing on that list is a weighted blend of the others.
 6. A station can be **drawn twice**, identically. Key stations by cell and merge.
 7. 52 stations carry no label and 2 are labelled only with an icon glyph. They are
    real stations and stay in the graph as interchange/through nodes; they are simply

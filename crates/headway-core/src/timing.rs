@@ -21,6 +21,12 @@
 //!
 //! [`DWELL`], the stand at an intermediate stop, is the remaining flat number.
 //!
+//! A line the planner may not use is still timed here. Switching a service
+//! category off in the routing panel does not change what riding it would
+//! cost — it only stops the search offering it — so [`Timing::rides`] is asked
+//! separately from [`Timing::edge`], and the debug labels on the map keep
+//! telling the truth about track nobody is being routed over.
+//!
 //! Boarding the *first* service is not charged a wait. The journey time is
 //! time spent travelling, and a passenger starting out can look up a departure
 //! in a way that one already mid-journey cannot. Comparing two routes is
@@ -54,6 +60,8 @@ pub struct Timing<'a> {
     /// Seconds of expected wait for each line, by line index: half its
     /// headway.
     waits: Vec<f64>,
+    /// Whether the planner may ride each line, by line index.
+    ridable: Vec<bool>,
     /// Seconds stood at an intermediate stop.
     pub dwell: f64,
     /// Seconds to walk across an interchange.
@@ -80,7 +88,15 @@ impl<'a> Timing<'a> {
             .iter()
             .map(|line| services.headway_of(line.id) * 60.0 / 2.0)
             .collect();
-        Self { net, seconds, waits, dwell: DWELL, walk: services.walk() }
+        // The two reasons a line is not an option are folded together here,
+        // because the search has no use for the difference: a line drawn so
+        // that it cannot be followed is as unridable as one switched off.
+        let ridable = net
+            .lines
+            .iter()
+            .map(|line| line.routable && services.can_ride(line.id))
+            .collect();
+        Self { net, seconds, waits, ridable, dwell: DWELL, walk: services.walk() }
     }
 
     /// The map timed with a fresh scale and fresh service categories, which is
@@ -101,6 +117,18 @@ impl<'a> Timing<'a> {
     /// Seconds of expected wait for a line: half the gap between its services.
     pub fn wait(&self, line: LineId) -> f64 {
         self.waits.get(line.0).copied().unwrap_or(0.0)
+    }
+
+    /// Whether the planner may ride a line at all: its service category is
+    /// switched on, and the map draws it in a way that can be followed.
+    pub fn rides(&self, line: LineId) -> bool {
+        self.ridable.get(line.0).copied().unwrap_or(false)
+    }
+
+    /// Whether there is anything at all to ride. False when every service
+    /// category has been switched off.
+    pub fn anything_rides(&self) -> bool {
+        self.ridable.iter().any(|on| *on)
     }
 
     /// Seconds to change onto a line: the walk, and then the wait.
@@ -297,6 +325,33 @@ mod tests {
             "{} s should be dominated by the wait",
             journey.seconds,
         );
+    }
+
+    #[test]
+    fn a_line_in_a_switched_off_category_is_still_timed_honestly() {
+        let net = net();
+        let mut services = Services::for_network(&net);
+        let east = net.lines.iter().find(|l| l.name == "East").expect("the East line").id;
+        let open = Timing::new(&net, &Scale::for_network(&net), &services);
+
+        let apart = services.add("Not today");
+        services.assign(east, apart);
+        services.set_allowed(apart, false);
+        let shut = Timing::new(&net, &Scale::for_network(&net), &services);
+
+        assert!(open.rides(east) && open.anything_rides());
+        assert!(!shut.rides(east), "the planner may not use it");
+        assert!(shut.anything_rides(), "but the rest of the map is still open");
+        // What riding it would cost is unchanged: the map's labels are drawn
+        // from these figures whether or not a route is offered over them.
+        for edge in &net.edges {
+            assert_eq!(shut.edge(edge.id), open.edge(edge.id));
+        }
+        assert_eq!(shut.wait(east), open.wait(east));
+
+        services.set_allowed(0, false);
+        let closed = Timing::new(&net, &Scale::for_network(&net), &services);
+        assert!(!closed.anything_rides(), "with every category off there is nothing to ride");
     }
 
     #[test]

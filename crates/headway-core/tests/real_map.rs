@@ -6,7 +6,7 @@
 
 use headway_core::network::Shape;
 use headway_core::{
-    fade, fastest, parse, root_inner_range, trace, Cell, Network, Scale, Services, Timing,
+    fade, fastest, options, parse, root_inner_range, trace, Cell, Network, Scale, Services, Timing,
 };
 
 fn real_map() -> Option<Network> {
@@ -330,6 +330,122 @@ fn a_fresh_map_sorts_its_lines_by_how_they_are_drawn() {
     let default = &services.categories()[0];
     assert!(services.lines_in(0).len() * 2 > net.lines.len(), "the default holds most of them");
     assert!(default.run_time(1.0) > 0.0 && default.run_time(1.0) < 600.0);
+}
+
+#[test]
+fn a_real_journey_is_offered_more_than_one_way_to_make_it() {
+    let net = map_or_skip!();
+    let scale = Scale::for_network(&net);
+    let mut services = Services::for_network(&net);
+    // Three minutes on everything, which is what makes a change cheap enough
+    // for the second and third ways round to be worth anybody's attention.
+    for at in 0..services.categories().len() {
+        services.set_headway(at, 3.0);
+    }
+    let timing = Timing::new(&net, &scale, &services);
+
+    let from = net.station_named("Zamalek").expect("Zamalek is on the map");
+    let to = net.station_named("Bergerula").expect("Bergerula is on the map");
+    let picks = options(&timing, from, to).expect("Zamalek reaches Bergerula");
+
+    // A city this size has more than one way across it.
+    assert!(picks.len() > 1, "only {} way offered", picks.len());
+    assert!(picks.len() <= headway_core::route::OPTIONS);
+    assert_eq!(picks[0].merit, headway_core::Merit::Fastest);
+    assert_eq!(
+        picks[0].journey,
+        fastest(&timing, from, to).expect("a route"),
+        "the head of the list is the single answer",
+    );
+
+    let mut labels = Vec::new();
+    for pick in &picks {
+        // Every card has to be costed by the model that chose it, or the panel
+        // shows a time for a route that was picked by a different number.
+        assert!(
+            (pick.journey.seconds - timing.journey(&pick.journey)).abs() < 1e-6,
+            "{}: searched {} s, reported {} s",
+            pick.merit.label(&net),
+            pick.journey.seconds,
+            timing.journey(&pick.journey),
+        );
+        // Nothing on the list is a way nobody would go.
+        assert!(
+            pick.journey.seconds
+                <= picks[0].journey.seconds * headway_core::route::SPREAD + 1e-6,
+            "{} takes {} s against the quickest {} s",
+            pick.merit.label(&net),
+            pick.journey.seconds,
+            picks[0].journey.seconds,
+        );
+        labels.push(pick.merit.label(&net));
+    }
+
+    // Quickest first, no repeats, and each card says something different.
+    for pair in picks.windows(2) {
+        assert!(pair[0].journey.seconds <= pair[1].journey.seconds, "in time order");
+        assert_ne!(pair[0].journey.legs, pair[1].journey.legs, "the same journey twice");
+    }
+    labels.sort();
+    let distinct = labels.len();
+    labels.dedup();
+    assert_eq!(labels.len(), distinct, "two cards with one label: {labels:?}");
+}
+
+#[test]
+fn switching_a_whole_kind_of_service_off_reroutes_a_real_journey() {
+    let net = map_or_skip!();
+    let scale = Scale::for_network(&net);
+    let services = Services::for_network(&net);
+    let from = net.station_named("Zamalek").expect("Zamalek is on the map");
+    let to = net.station_named("Xiguan").expect("Xiguan is on the map");
+
+    let open = Timing::new(&net, &scale, &services);
+    let before = fastest(&open, from, to).expect("Zamalek reaches Xiguan");
+
+    // Whichever category that journey leans on, take it away and ask again.
+    // Named nowhere here on purpose: the map is re-exported from time to time
+    // and this has to keep asking the same question when it is.
+    let leant_on = services.category_of(before.legs[0].line);
+    let mut without = services.clone();
+    without.set_allowed(leant_on, false);
+    let shut = Timing::new(&net, &scale, &without);
+
+    assert!(!shut.rides(before.legs[0].line), "the first leg is off the table");
+    match fastest(&shut, from, to) {
+        // Unreachable is a fair answer — a map can be held together by one
+        // kind of service — but if there is a way round, it has to obey.
+        Err(why) => assert_eq!(why, headway_core::RouteError::Unreachable, "{why}"),
+        Ok(after) => {
+            for leg in &after.legs {
+                assert_ne!(
+                    without.category_of(leg.line),
+                    leant_on,
+                    "{} is in the category that was switched off",
+                    net.line(leg.line).name,
+                );
+            }
+            assert!(
+                after.seconds >= before.seconds - 1e-6,
+                "taking an option away cannot make the journey quicker: {} s then {} s",
+                before.seconds,
+                after.seconds,
+            );
+            // And the new journey is still costed by the model that chose it.
+            assert!((after.seconds - shut.journey(&after)).abs() < 1e-6);
+        }
+    }
+
+    // With every category off the planner says so rather than blaming the map.
+    let mut nothing = services.clone();
+    for at in 0..nothing.categories().len() {
+        nothing.set_allowed(at, false);
+    }
+    let closed = Timing::new(&net, &scale, &nothing);
+    assert_eq!(
+        fastest(&closed, from, to),
+        Err(headway_core::RouteError::NothingAllowed),
+    );
 }
 
 #[test]

@@ -2,8 +2,8 @@ use headway_core::service::{
     MAX_HEADWAY, MAX_RATE, MAX_SPEED, MAX_WALK, MIN_HEADWAY, MIN_RATE, MIN_SPEED,
 };
 use headway_core::{
-    fade, fastest, parse, root_inner_range, tag, trace, Category, LineId, Network, Scale, Services,
-    StationId, Timing, ViewBox,
+    fade, options, parse, root_inner_range, tag, trace, Category, Choice, LineId, Network, Scale,
+    Services, StationId, Timing, ViewBox,
 };
 use leptos::ev::{DragEvent, KeyboardEvent, MouseEvent, PointerEvent, WheelEvent};
 use leptos::prelude::*;
@@ -111,19 +111,98 @@ enum Row {
     },
 }
 
+/// One of the journeys on offer, with everything the panel and the map need
+/// from it already worked out.
 #[derive(Clone, PartialEq)]
-struct Plan {
+struct Routing {
+    /// What makes it worth offering: "Fastest", "Fewest changes", "via Line 9".
+    label: String,
     rows: Vec<Row>,
     stations: usize,
     transfers: usize,
     km: f64,
     seconds: f64,
-    /// Rules that fade the whole network to a pale diagram.
-    css: String,
-    /// The journey itself, drawn bold over that diagram.
+    /// The colour of each line ridden, in order, for the card's strip.
+    colours: Vec<String>,
+    /// The journey drawn bold over the faded map.
     trace: String,
     /// A distance beside every stretch of track, for the debug toggle.
     tags: String,
+}
+
+/// The ways of making one journey, quickest first.
+#[derive(Clone, PartialEq)]
+struct Plan {
+    /// Never empty: a plan that found nothing is an `Err` instead.
+    options: Vec<Routing>,
+    /// Rules that fade the whole network to a pale diagram. The map's, not any
+    /// one journey's, so one sheet serves every option.
+    css: String,
+}
+
+impl Plan {
+    /// The option on show. The index is clamped rather than reset, so that
+    /// editing a speed while reading the third card leaves it on screen.
+    fn shown(&self, at: usize) -> &Routing {
+        &self.options[at.min(self.options.len().saturating_sub(1))]
+    }
+}
+
+/// One offered journey, turned into rows, cards and map layers.
+///
+/// Every option is worked out, not only the one on show: picking a card has to
+/// be instant, and the whole set costs well under a millisecond on a real map.
+fn routing(
+    net: &Network,
+    measure: &Scale,
+    timing: &Timing,
+    sorted: &Services,
+    pick: &Choice,
+) -> Routing {
+    let journey = &pick.journey;
+    let mut rows = Vec::new();
+    let mut colours = Vec::new();
+    let (mut hops, mut texts) = (Vec::new(), Vec::new());
+    for (i, leg) in journey.legs.iter().enumerate() {
+        let line = net.line(leg.line);
+        colours.push(line.colour.clone());
+        rows.push(Row::Ride {
+            line: line.name.clone(),
+            colour: line.colour.clone(),
+            stations: leg.stations(),
+            km: measure.leg_km(net, leg),
+            seconds: timing.leg(leg),
+            every: every_text(sorted.headway_of(leg.line)),
+        });
+        if let Some(next) = journey.legs.get(i + 1) {
+            let wait = secs_text(timing.wait(next.line));
+            rows.push(Row::Transfer {
+                at: net.label(leg.alight()),
+                seconds: timing.boarding(next.line),
+                detail: match timing.walk > 0.0 {
+                    true => format!("{} walk · {wait} wait", secs_text(timing.walk)),
+                    false => format!("{wait} wait"),
+                },
+            });
+        }
+        // Measured stretch by stretch rather than split out of the leg,
+        // because each label states its own track.
+        for hop in leg.segments(net) {
+            texts.push(km_text(measure.length(&hop)));
+            hops.push(hop);
+        }
+    }
+    Routing {
+        label: pick.merit.label(net),
+        rows,
+        stations: journey.stations(),
+        transfers: journey.transfers(),
+        km: measure.journey_km(net, journey),
+        seconds: journey.seconds,
+        colours,
+        trace: trace(net, journey),
+        tags: tag(&hops, &texts),
+    }
 }
 
 fn window_size() -> (f64, f64) {
@@ -600,6 +679,16 @@ enum Panel {
     Service,
 }
 
+/// How many changes a journey asks for, counted out in words so that "0" never
+/// appears on a card.
+fn changes_text(transfers: usize) -> String {
+    match transfers {
+        0 => "no changes".to_string(),
+        1 => "1 change".to_string(),
+        n => format!("{n} changes"),
+    }
+}
+
 /// A journey as a transit app gives it: minutes, because nobody plans around
 /// the seconds.
 fn mins_text(s: f64) -> String {
@@ -940,6 +1029,8 @@ fn App() -> impl IntoView {
     let size = RwSignal::new(window_size());
     let origin = RwSignal::new(None::<StationId>);
     let destination = RwSignal::new(None::<StationId>);
+    // Which of the offered journeys is on show, by position in the list.
+    let chosen = RwSignal::new(0usize);
     // Replaced the moment a map loads, since a scale only describes one map.
     let scale = RwSignal::new(Scale::from_points((0.0, 0.0), Vec::new()));
     // The graph's kilometre axis, which is a view of the profile rather than
@@ -955,6 +1046,20 @@ fn App() -> impl IntoView {
     // of it — the tags are for reading the map, not the panel.
     let debug = RwSignal::new(false);
 
+    // The categories the planner may ride, for the switches in the routing
+    // panel. Read as names and switches only, so that editing a speed in the
+    // service settings does not rebuild the row — and so that renaming a
+    // category there relabels it here as it is typed.
+    let modes = Memo::new(move |_| {
+        services.with(|s| {
+            s.categories()
+                .iter()
+                .enumerate()
+                .map(|(at, c)| (at, c.name.clone(), s.allows(at)))
+                .collect::<Vec<_>>()
+        })
+    });
+
     // Re-planned whenever either end moves — and whenever the scale or the
     // service categories change, because the quickest route is now a question
     // about seconds, and both of those are part of the answer.
@@ -966,61 +1071,41 @@ fn App() -> impl IntoView {
         doc.with(|held| {
             let net = &held.as_ref()?.net;
             let timing = Timing::new(net, &measure, &sorted);
-            Some(match fastest(&timing, from, to) {
+            Some(match options(&timing, from, to) {
                 Err(why) => Err(why.to_string()),
-                Ok(journey) => {
-                    let mut rows = Vec::new();
-                    let (mut hops, mut texts) = (Vec::new(), Vec::new());
-                    for (i, leg) in journey.legs.iter().enumerate() {
-                        let line = net.line(leg.line);
-                        rows.push(Row::Ride {
-                            line: line.name.clone(),
-                            colour: line.colour.clone(),
-                            stations: leg.stations(),
-                            km: measure.leg_km(net, leg),
-                            seconds: timing.leg(leg),
-                            every: every_text(sorted.headway_of(leg.line)),
-                        });
-                        if let Some(next) = journey.legs.get(i + 1) {
-                            let wait = secs_text(timing.wait(next.line));
-                            rows.push(Row::Transfer {
-                                at: net.label(leg.alight()),
-                                seconds: timing.boarding(next.line),
-                                detail: match timing.walk > 0.0 {
-                                    true => format!("{} walk · {wait} wait", secs_text(timing.walk)),
-                                    false => format!("{wait} wait"),
-                                },
-                            });
-                        }
-                        // Measured stretch by stretch rather than split out of
-                        // the leg, because each label states its own track.
-                        for hop in leg.segments(net) {
-                            texts.push(km_text(measure.length(&hop)));
-                            hops.push(hop);
-                        }
-                    }
-                    Ok(Plan {
-                        rows,
-                        stations: journey.stations(),
-                        transfers: journey.transfers(),
-                        km: measure.journey_km(net, &journey),
-                        seconds: journey.seconds,
-                        css: fade(net),
-                        trace: trace(net, &journey),
-                        tags: tag(&hops, &texts),
-                    })
-                }
+                Ok(picks) => Ok(Plan {
+                    options: picks
+                        .iter()
+                        .map(|pick| routing(net, &measure, &timing, &sorted, pick))
+                        .collect(),
+                    css: fade(net),
+                }),
             })
         })
     });
 
+    // A new pair of endpoints starts on the recommended option. Editing a
+    // speed or dragging the scale does not: the cards are re-planned under the
+    // pick, which is what reading one while changing a setting is for.
+    Effect::new(move |_| {
+        origin.track();
+        destination.track();
+        chosen.set(0);
+    });
+
+    // The option on show, which the map follows.
+    let picked = move || -> Option<Routing> {
+        let at = chosen.get();
+        plan.with(|outcome| match outcome.as_ref() {
+            Some(Ok(p)) => Some(p.shown(at).clone()),
+            _ => None,
+        })
+    };
+
     // The debug overlay, which the plan has already drawn: shown or not.
     let tags = move || match debug.get() {
         false => String::new(),
-        true => plan.with(|outcome| match outcome.as_ref() {
-            Some(Ok(p)) => p.tags.clone(),
-            _ => String::new(),
-        }),
+        true => picked().map(|shown| shown.tags).unwrap_or_default(),
     };
 
     window_event_listener(leptos::ev::resize, move |_| size.set(window_size()));
@@ -1171,7 +1256,7 @@ fn App() -> impl IntoView {
                     // in the SVG namespace and the halves render as they did.
                     <g inner_html=d.under />
                     <g class="route" inner_html=move || {
-                        plan.get().and_then(Result::ok).map(|p| p.trace).unwrap_or_default()
+                        picked().map(|shown| shown.trace).unwrap_or_default()
                     } />
                     <g inner_html=d.over />
 
@@ -1232,56 +1317,138 @@ fn App() -> impl IntoView {
                         <StationSearch placeholder="From" net=Arc::clone(&d.net) selected=origin />
                         <StationSearch placeholder="To" net=Arc::clone(&d.net) selected=destination />
 
+                        // What the journey may be made of. Here rather than in
+                        // the service settings because it is a question about
+                        // this trip — "how would I get there without the
+                        // tram?" — and the answer has to be visible beside the
+                        // itinerary it changes.
+                        <div class="modes">
+                            {move || modes.get().into_iter().map(|(at, name, on)| {
+                                let shown = match name.trim().is_empty() {
+                                    true => "Unnamed".to_string(),
+                                    false => name,
+                                };
+                                let title = match on {
+                                    true => format!("Plan without {shown}"),
+                                    false => format!("Use {shown} again"),
+                                };
+                                view! {
+                                    <button class="mode" class:off=!on
+                                            aria-pressed=on.to_string() title=title
+                                            on:click=move |_| services.update(|s| {
+                                                s.set_allowed(at, !on)
+                                            })>
+                                        <span class="mode-dot"
+                                              style=format!("background:{}", category_hue(at))>
+                                        </span>
+                                        {shown}
+                                    </button>
+                                }
+                            }).collect_view()}
+                        </div>
+
                         {move || plan.get().map(|outcome| match outcome {
                             Err(why) => view! { <p class="plan-note">{why}</p> }.into_any(),
-                            Ok(p) => view! {
-                                // Global, so it reaches the map; mounted with
-                                // the itinerary so it comes and goes with it.
-                                <style>{p.css}</style>
-                                <div class="itinerary">
-                                    <p class="plan-time">{mins_text(p.seconds)}</p>
-                                    <p class="plan-note">{format!(
-                                        "{} · {} station{} · {} transfer{}",
-                                        km_text(p.km),
-                                        p.stations, if p.stations == 1 { "" } else { "s" },
-                                        p.transfers, if p.transfers == 1 { "" } else { "s" },
-                                    )}</p>
-                                    {p.rows.into_iter().map(|row| match row {
-                                        Row::Ride {
-                                            line, colour, stations, km, seconds, every,
-                                        } => view! {
-                                            <div class="ride">
-                                                <span class="swatch"
-                                                      style=format!("background:{colour}")></span>
-                                                <div class="ride-body">
-                                                    <div class="ride-top">
-                                                        <span class="ride-line">{line}</span>
-                                                        <span class="ride-time">
+                            Ok(p) => {
+                                let at = chosen.get().min(p.options.len().saturating_sub(1));
+                                let shown = p.shown(at).clone();
+                                let several = p.options.len() > 1;
+                                let cards = several.then(|| p.options.clone());
+                                view! {
+                                    // Global, so it reaches the map; mounted
+                                    // with the itinerary so it comes and goes
+                                    // with it.
+                                    <style>{p.css}</style>
+
+                                    // The ways of making this journey. One way
+                                    // is no choice, so the cards only appear
+                                    // when there is something to choose.
+                                    {cards.map(|options| view! {
+                                        <div class="choices">
+                                            {options.into_iter().enumerate().map(|(i, o)| {
+                                                view! {
+                                                    <button class="choice" class:on=i == at
+                                                            aria-pressed=(i == at).to_string()
+                                                            on:click=move |_| chosen.set(i)>
+                                                        <span class="choice-time">
+                                                            {mins_text(o.seconds)}
+                                                        </span>
+                                                        <span class="choice-body">
+                                                            <span class="choice-label">
+                                                                {o.label}
+                                                            </span>
+                                                            <span class="choice-sub">
+                                                                <span class="choice-lines">
+                                                                    {o.colours.into_iter().map(|c| {
+                                                                        view! {
+                                                                            <span class="choice-bar"
+                                                                                  style=format!(
+                                                                                      "background:{c}",
+                                                                                  )></span>
+                                                                        }
+                                                                    }).collect_view()}
+                                                                </span>
+                                                                {changes_text(o.transfers)}
+                                                            </span>
+                                                        </span>
+                                                    </button>
+                                                }
+                                            }).collect_view()}
+                                        </div>
+                                    })}
+
+                                    <div class="itinerary">
+                                        // With cards up, the picked one is the
+                                        // headline; printing the same minutes
+                                        // again two rows below it is noise.
+                                        {(!several).then(|| view! {
+                                            <p class="plan-time">{mins_text(shown.seconds)}</p>
+                                        })}
+                                        <p class="plan-note">{format!(
+                                            "{} · {} station{} · {}",
+                                            km_text(shown.km),
+                                            shown.stations,
+                                            if shown.stations == 1 { "" } else { "s" },
+                                            changes_text(shown.transfers),
+                                        )}</p>
+                                        {shown.rows.into_iter().map(|row| match row {
+                                            Row::Ride {
+                                                line, colour, stations, km, seconds, every,
+                                            } => view! {
+                                                <div class="ride">
+                                                    <span class="swatch"
+                                                          style=format!("background:{colour}")>
+                                                    </span>
+                                                    <div class="ride-body">
+                                                        <div class="ride-top">
+                                                            <span class="ride-line">{line}</span>
+                                                            <span class="ride-time">
+                                                                {secs_text(seconds)}
+                                                            </span>
+                                                        </div>
+                                                        <div class="ride-sub">{format!(
+                                                            "{stations} station{} · {} · {every}",
+                                                            if stations == 1 { "" } else { "s" },
+                                                            km_text(km),
+                                                        )}</div>
+                                                    </div>
+                                                </div>
+                                            }.into_any(),
+                                            Row::Transfer { at, seconds, detail } => view! {
+                                                <div class="transfer">
+                                                    <div class="transfer-top">
+                                                        <span>{format!("transfer at {at}")}</span>
+                                                        <span class="transfer-time">
                                                             {secs_text(seconds)}
                                                         </span>
                                                     </div>
-                                                    <div class="ride-sub">{format!(
-                                                        "{stations} station{} · {} · {every}",
-                                                        if stations == 1 { "" } else { "s" },
-                                                        km_text(km),
-                                                    )}</div>
+                                                    <div class="transfer-sub">{detail}</div>
                                                 </div>
-                                            </div>
-                                        }.into_any(),
-                                        Row::Transfer { at, seconds, detail } => view! {
-                                            <div class="transfer">
-                                                <div class="transfer-top">
-                                                    <span>{format!("transfer at {at}")}</span>
-                                                    <span class="transfer-time">
-                                                        {secs_text(seconds)}
-                                                    </span>
-                                                </div>
-                                                <div class="transfer-sub">{detail}</div>
-                                            </div>
-                                        }.into_any(),
-                                    }).collect_view()}
-                                </div>
-                            }.into_any(),
+                                            }.into_any(),
+                                        }).collect_view()}
+                                    </div>
+                                }.into_any()
+                            }
                         })}
                     </div>
                 </div>
@@ -1457,6 +1624,42 @@ mod tests {
         assert_eq!(axis_step(100.0, true), 150.0);
         assert_eq!(axis_step(150.0, false), 100.0);
         assert_eq!(axis_step(50.0, false), 25.0);
+    }
+
+    #[test]
+    fn changes_are_counted_out_in_words() {
+        // "0 transfers" on a card is how an app tells you it was written by
+        // someone counting rows rather than saying anything.
+        assert_eq!(changes_text(0), "no changes");
+        assert_eq!(changes_text(1), "1 change");
+        assert_eq!(changes_text(4), "4 changes");
+    }
+
+    #[test]
+    fn the_shown_option_is_clamped_rather_than_lost() {
+        // The cards are re-planned under the pick whenever a setting moves, so
+        // a plan that comes back shorter must not take the panel with it.
+        let one = |label: &str, seconds: f64| Routing {
+            label: label.to_string(),
+            rows: Vec::new(),
+            stations: 2,
+            transfers: 0,
+            km: 1.0,
+            seconds,
+            colours: Vec::new(),
+            trace: String::new(),
+            tags: String::new(),
+        };
+        let plan = Plan {
+            options: vec![one("Fastest", 600.0), one("Fewest changes", 800.0)],
+            css: String::new(),
+        };
+        assert_eq!(plan.shown(0).label, "Fastest");
+        assert_eq!(plan.shown(1).label, "Fewest changes");
+        assert_eq!(plan.shown(7).label, "Fewest changes", "the last one, not a panic");
+
+        let alone = Plan { options: vec![one("Fastest", 600.0)], css: String::new() };
+        assert_eq!(alone.shown(2).label, "Fastest");
     }
 
     #[test]

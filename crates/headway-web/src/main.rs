@@ -1,9 +1,10 @@
 use headway_core::service::{
     MAX_HEADWAY, MAX_RATE, MAX_SPEED, MAX_WALK, MIN_HEADWAY, MIN_RATE, MIN_SPEED,
 };
+use headway_core::reach::{self, BAND_INK, BANDS};
 use headway_core::{
     fade, options, parse, root_inner_range, tag, trace, Category, Choice, LineId, Network, Scale,
-    Services, StationId, Timing, ViewBox,
+    Services, Spread, StationId, Timing, ViewBox,
 };
 use leptos::ev::{DragEvent, KeyboardEvent, MouseEvent, PointerEvent, WheelEvent};
 use leptos::prelude::*;
@@ -19,6 +20,16 @@ const MIN_ZOOM: f64 = 0.05;
 const MAX_ZOOM: f64 = 400.0;
 /// Leave a little air around the map when fitting it to the window.
 const FIT_MARGIN: f64 = 0.94;
+/// The shortest and longest isochrone worth drawing, in minutes. Four hours is
+/// past the point where a fantasy metro map has anything left to say.
+const MIN_MINUTES: f64 = 1.0;
+const MAX_MINUTES: f64 = 240.0;
+/// How near a tap has to land to count as pointing at a station, in screen
+/// pixels. Measured on screen rather than on the map, so pointing is as easy
+/// zoomed out as zoomed in.
+const PICK_RADIUS: f64 = 16.0;
+/// How far a pointer may travel and still be a tap rather than a pan.
+const PICK_DRIFT: f64 = 5.0;
 
 fn main() {
     console_error_panic_hook::set_once();
@@ -128,6 +139,40 @@ struct Routing {
     trace: String,
     /// A distance beside every stretch of track, for the debug toggle.
     tags: String,
+}
+
+/// What the map is for at the moment.
+///
+/// Two questions, not two apps: both run on the same timings, and the settings
+/// panels serve either. Switching is how you ask the other one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// How do I get from here to there.
+    Route,
+    /// What is within half an hour of here.
+    Spread,
+}
+
+/// An isochrone, worked out for one origin and one limit.
+#[derive(Clone, PartialEq)]
+struct Isochrone {
+    /// The station it spreads from.
+    from: String,
+    /// Stations inside the limit, of those anything reaches, of all there are.
+    inside: usize,
+    reached: usize,
+    total: usize,
+    /// Each band: the time it runs to, and how many stations fall in it.
+    bands: Vec<(f64, usize)>,
+    /// The last few stations inside the limit, which is where an argument
+    /// about the limit actually happens.
+    edge: Vec<(String, f64)>,
+    /// Rules that fade the map behind the isochrone.
+    css: String,
+    /// Banded track, a dot per station reached, a ring where it starts.
+    layer: String,
+    /// The minutes written beside every station, for the debug toggle.
+    stamps: String,
 }
 
 /// The ways of making one journey, quickest first.
@@ -427,8 +472,12 @@ fn ScalePanel(
     scale: RwSignal<Scale>,
     y_max: RwSignal<f64>,
     panel: RwSignal<Option<Panel>>,
-    /// Writes each leg's distance onto the map beside the leg.
+    /// Writes the numbers onto the map: a distance per section of track, or
+    /// the minutes at each station when the map is showing travel time.
     debug: RwSignal<bool>,
+    /// Whether the map is showing travel time, which is all this panel needs
+    /// to know about the mode: it only changes what the toggle above says.
+    spread: Signal<bool>,
 ) -> impl IntoView {
     // Which control point the pointer is holding, if any.
     let held = RwSignal::new(None::<usize>);
@@ -665,7 +714,10 @@ fn ScalePanel(
             <label class="check">
                 <input type="checkbox" prop:checked=move || debug.get()
                        on:change=move |ev| debug.set(event_target_checked(&ev)) />
-                <span>"Label every section between stations on the map"</span>
+                <span>{move || match spread.get() {
+                    false => "Label every section between stations on the map",
+                    true => "Write the minutes beside every station on the map",
+                }}</span>
             </label>
         </div>
     }
@@ -729,6 +781,46 @@ fn secs_text(s: f64) -> String {
 fn category_hue(at: usize) -> String {
     const HUES: [u16; 6] = [214, 152, 28, 330, 268, 86];
     format!("hsl({}, 62%, 46%)", HUES[at % HUES.len()])
+}
+
+/// Which kinds of service the planner may use.
+///
+/// In the routing panels rather than the service settings, because it is a
+/// question about the trip in front of you — "how would I get there without
+/// the tram?", "what is half an hour away on the metro alone?" — and the
+/// answer has to be visible beside the thing it changes. One row, shown in
+/// both panels, switching the same thing.
+#[component]
+fn CategorySwitches(
+    services: RwSignal<Services>,
+    /// Names and switches only, so that a speed edited in the service panel
+    /// does not rebuild the row — and renaming a category there relabels it
+    /// here as it is typed.
+    modes: Memo<Vec<(usize, String, bool)>>,
+) -> impl IntoView {
+    view! {
+        <div class="modes">
+            {move || modes.get().into_iter().map(|(at, name, on)| {
+                let shown = match name.trim().is_empty() {
+                    true => "Unnamed".to_string(),
+                    false => name,
+                };
+                let title = match on {
+                    true => format!("Leave {shown} out"),
+                    false => format!("Use {shown} again"),
+                };
+                view! {
+                    <button class="mode" class:off=!on
+                            aria-pressed=on.to_string() title=title
+                            on:click=move |_| services.update(|s| s.set_allowed(at, !on))>
+                        <span class="mode-dot"
+                              style=format!("background:{}", category_hue(at))></span>
+                        {shown}
+                    </button>
+                }
+            }).collect_view()}
+        </div>
+    }
 }
 
 /// Service categories: what kind of thing each line is, and how fast that kind
@@ -1031,6 +1123,12 @@ fn App() -> impl IntoView {
     let destination = RwSignal::new(None::<StationId>);
     // Which of the offered journeys is on show, by position in the list.
     let chosen = RwSignal::new(0usize);
+    // Routing, or travel time from one station.
+    let mode = RwSignal::new(Mode::Route);
+    // The isochrone's origin, picked on the map or by name, and how far out it
+    // is drawn.
+    let focus = RwSignal::new(None::<StationId>);
+    let minutes = RwSignal::new(30.0f64);
     // Replaced the moment a map loads, since a scale only describes one map.
     let scale = RwSignal::new(Scale::from_points((0.0, 0.0), Vec::new()));
     // The graph's kilometre axis, which is a view of the profile rather than
@@ -1102,10 +1200,58 @@ fn App() -> impl IntoView {
         })
     };
 
+    // How long everything is from the station in focus. The limit is not part
+    // of this: the whole map is timed once, and the minutes figure slices the
+    // answer, so dragging it about costs nothing.
+    let spread = Memo::new(move |_| -> Option<Spread> {
+        let from = focus.get()?;
+        let (measure, sorted) = (scale.get(), services.get());
+        doc.with(|held| {
+            let net = &held.as_ref()?.net;
+            Some(Spread::from(&Timing::new(net, &measure, &sorted), from))
+        })
+    });
+
+    // That table cut at the limit: the legend, the counts, and the layer the
+    // map draws.
+    let iso = Memo::new(move |_| -> Option<Isochrone> {
+        let spread = spread.get()?;
+        let limit = minutes.get().clamp(MIN_MINUTES, MAX_MINUTES) * 60.0;
+        let (measure, sorted) = (scale.get(), services.get());
+        doc.with(|held| {
+            let net = &held.as_ref()?.net;
+            let timing = Timing::new(net, &measure, &sorted);
+            let stops = spread.stops(net, limit);
+            let counts = spread.counts(limit);
+            Some(Isochrone {
+                from: net.label(spread.origin()),
+                inside: stops.len(),
+                reached: spread.reached(),
+                total: net.stations.len(),
+                bands: (0..BANDS)
+                    .map(|b| (limit * (b + 1) as f64 / BANDS as f64, counts[b]))
+                    .collect(),
+                edge: stops
+                    .iter()
+                    .rev()
+                    .take(4)
+                    .map(|stop| (net.label(stop.station), stop.seconds))
+                    .collect(),
+                css: fade(net),
+                layer: reach::layer(&spread.fringe(&timing, limit), &stops, spread.start(net)),
+                stamps: reach::stamp(&stops),
+            })
+        })
+    });
+
     // The debug overlay, which the plan has already drawn: shown or not.
-    let tags = move || match debug.get() {
-        false => String::new(),
-        true => picked().map(|shown| shown.tags).unwrap_or_default(),
+    // What the debug toggle writes on the map, which is a different number in
+    // each mode: how long a section of track is, or how long a station is from
+    // the one in focus.
+    let tags = move || match (debug.get(), mode.get()) {
+        (false, _) => String::new(),
+        (true, Mode::Route) => picked().map(|shown| shown.tags).unwrap_or_default(),
+        (true, Mode::Spread) => iso.get().map(|drawn| drawn.stamps).unwrap_or_default(),
     };
 
     window_event_listener(leptos::ev::resize, move |_| size.set(window_size()));
@@ -1149,6 +1295,7 @@ fn App() -> impl IntoView {
             services.set(Services::for_network(&network));
             origin.set(None);
             destination.set(None);
+            focus.set(None);
             error.set(None);
             size.set(window_size());
             view.set(View::fit(vb, window_size()));
@@ -1172,7 +1319,28 @@ fn App() -> impl IntoView {
         }
     };
 
-    let end_drag = move |_: PointerEvent| drag.set(None);
+    // A tap rather than a pan, in travel time mode, points at a station.
+    let end_drag = move |ev: PointerEvent| {
+        if let Some((sx, sy, start)) = drag.get() {
+            let (cx, cy) = (ev.client_x() as f64, ev.client_y() as f64);
+            let drift = (cx - sx).hypot(cy - sy);
+            if mode.get() == Mode::Spread && drift <= PICK_DRIFT {
+                // A pointer radius, not a map radius: the whole map zoomed out
+                // is still something you can point at.
+                let within = PICK_RADIUS / start.zoom.max(1e-9);
+                let found = doc.with(|held| {
+                    held.as_ref()?.net.station_near(start.to_map(cx, cy), within)
+                });
+                // A tap on empty paper leaves the isochrone where it is; it is
+                // far more likely to be a missed station than a request for
+                // nothing at all.
+                if let Some(id) = found {
+                    focus.set(Some(id));
+                }
+            }
+        }
+        drag.set(None);
+    };
 
     // The crosshair the distances are measured from. It lives inside the map's
     // own svg so that it can be placed in map coordinates, which means every
@@ -1236,7 +1404,7 @@ fn App() -> impl IntoView {
         <input id="svg" class="file-input" type="file" accept=".svg,image/svg+xml"
                on:change=on_file />
 
-        <div class="viewport"
+        <div class="viewport" class:picking=move || mode.get() == Mode::Spread
              class:dragging=move || drag.with(Option::is_some)
              on:pointerdown=on_pointer_down
              on:pointermove=on_pointer_move
@@ -1255,8 +1423,9 @@ fn App() -> impl IntoView {
                     // map. `g` is an SVG element to Leptos, so these are built
                     // in the SVG namespace and the halves render as they did.
                     <g inner_html=d.under />
-                    <g class="route" inner_html=move || {
-                        picked().map(|shown| shown.trace).unwrap_or_default()
+                    <g class="route" inner_html=move || match mode.get() {
+                        Mode::Route => picked().map(|shown| shown.trace).unwrap_or_default(),
+                        Mode::Spread => iso.get().map(|drawn| drawn.layer).unwrap_or_default(),
                     } />
                     <g inner_html=d.over />
 
@@ -1307,45 +1476,47 @@ fn App() -> impl IntoView {
         // Rebuilt per map, which also clears the pickers when one is loaded.
         {move || doc.get().map(|d| {
             view! {
+                // Two questions about the same map, and the switch between
+                // them sits in the middle at the top where neither panel can
+                // claim it.
+                <div class="switch">
+                    <button class="seg" class:on=move || mode.get() == Mode::Route
+                            aria-pressed=move || (mode.get() == Mode::Route).to_string()
+                            on:click=move |_| mode.set(Mode::Route)>"Route"</button>
+                    <button class="seg" class:on=move || mode.get() == Mode::Spread
+                            aria-pressed=move || (mode.get() == Mode::Spread).to_string()
+                            on:click=move |_| mode.set(Mode::Spread)>"Travel time"</button>
+                </div>
+
                 <div class="topleft">
+                    // Global, so it reaches the map. One sheet serves both
+                    // modes — it is the map being pushed back, not the thing
+                    // drawn over it — and it is mounted only while there is
+                    // something drawn over it.
+                    {move || {
+                        let sheet = match mode.get() {
+                            Mode::Route => plan.with(|outcome| match outcome.as_ref() {
+                                Some(Ok(p)) => Some(p.css.clone()),
+                                _ => None,
+                            }),
+                            Mode::Spread => iso.get().map(|drawn| drawn.css),
+                        };
+                        sheet.map(|css| view! { <style>{css}</style> })
+                    }}
+
                     <div class="chip">
                         <span class="name">{d.name.clone()}</span>
                         <label for="svg" class="btn btn-quiet">"Change map"</label>
                     </div>
 
-                    <div class="planner">
+                    // Both panels stay mounted, one of them hidden, so that
+                    // switching across and back does not empty the boxes.
+                    <div class="planner" class:hidden=move || mode.get() != Mode::Route>
                         <StationSearch placeholder="From" net=Arc::clone(&d.net) selected=origin />
                         <StationSearch placeholder="To" net=Arc::clone(&d.net) selected=destination />
 
-                        // What the journey may be made of. Here rather than in
-                        // the service settings because it is a question about
-                        // this trip — "how would I get there without the
-                        // tram?" — and the answer has to be visible beside the
-                        // itinerary it changes.
-                        <div class="modes">
-                            {move || modes.get().into_iter().map(|(at, name, on)| {
-                                let shown = match name.trim().is_empty() {
-                                    true => "Unnamed".to_string(),
-                                    false => name,
-                                };
-                                let title = match on {
-                                    true => format!("Plan without {shown}"),
-                                    false => format!("Use {shown} again"),
-                                };
-                                view! {
-                                    <button class="mode" class:off=!on
-                                            aria-pressed=on.to_string() title=title
-                                            on:click=move |_| services.update(|s| {
-                                                s.set_allowed(at, !on)
-                                            })>
-                                        <span class="mode-dot"
-                                              style=format!("background:{}", category_hue(at))>
-                                        </span>
-                                        {shown}
-                                    </button>
-                                }
-                            }).collect_view()}
-                        </div>
+                        // What the journey may be made of.
+                        <CategorySwitches services=services modes=modes />
 
                         {move || plan.get().map(|outcome| match outcome {
                             Err(why) => view! { <p class="plan-note">{why}</p> }.into_any(),
@@ -1355,11 +1526,6 @@ fn App() -> impl IntoView {
                                 let several = p.options.len() > 1;
                                 let cards = several.then(|| p.options.clone());
                                 view! {
-                                    // Global, so it reaches the map; mounted
-                                    // with the itinerary so it comes and goes
-                                    // with it.
-                                    <style>{p.css}</style>
-
                                     // The ways of making this journey. One way
                                     // is no choice, so the cards only appear
                                     // when there is something to choose.
@@ -1451,6 +1617,94 @@ fn App() -> impl IntoView {
                             }
                         })}
                     </div>
+
+                    <div class="planner" class:hidden=move || mode.get() != Mode::Spread>
+                        <StationSearch placeholder="Travel time from"
+                                       net=Arc::clone(&d.net) selected=focus />
+
+                        <div class="row">
+                            <span class="row-label">"Within"</span>
+                            <input class="num mins" type="number" step="5"
+                                   min=MIN_MINUTES.to_string() max=MAX_MINUTES.to_string()
+                                   aria-label="Minutes"
+                                   prop:value=move || minutes.get()
+                                   on:input=move |ev| {
+                                       if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                           if v.is_finite() {
+                                               minutes.set(v.clamp(MIN_MINUTES, MAX_MINUTES));
+                                           }
+                                       }
+                                   } />
+                            <span class="row-unit">"minutes of here"</span>
+                        </div>
+
+                        // What the half hour may be spent on. The same
+                        // switches as the routing panel, because it is the
+                        // same question asked of the same search.
+                        <CategorySwitches services=services modes=modes />
+
+                        {move || match iso.get() {
+                            None => view! {
+                                <p class="plan-note">
+                                    "Tap a station on the map, or name one above, and \
+                                     everything within reach of it is banded by how long \
+                                     it takes to get there."
+                                </p>
+                            }.into_any(),
+                            Some(drawn) => {
+                                let limit = drawn.bands.last().map_or(0.0, |(to, _)| *to);
+                                view! {
+                                    <p class="plan-time">{format!(
+                                        "{} station{}",
+                                        drawn.inside,
+                                        if drawn.inside == 1 { "" } else { "s" },
+                                    )}</p>
+                                    <p class="plan-note">{format!(
+                                        "within {} of {} · {} of the {} any line reaches, \
+                                         out of {} on the map",
+                                        mins_text(limit),
+                                        drawn.from,
+                                        drawn.inside,
+                                        drawn.reached,
+                                        drawn.total,
+                                    )}</p>
+
+                                    <div class="legend">
+                                        {drawn.bands.into_iter().enumerate()
+                                            .map(|(band, (upto, count))| view! {
+                                                <div class="band">
+                                                    <span class="band-ink"
+                                                          style=format!(
+                                                              "background:{}",
+                                                              BAND_INK[band.min(BANDS - 1)],
+                                                          )></span>
+                                                    <span class="band-range">{format!(
+                                                        "to {}", secs_text(upto),
+                                                    )}</span>
+                                                    <span class="band-count">{format!(
+                                                        "{count}",
+                                                    )}</span>
+                                                </div>
+                                            }).collect_view()}
+                                    </div>
+
+                                    {(!drawn.edge.is_empty()).then(|| view! {
+                                        <p class="plan-note">"last stops inside the limit"</p>
+                                        <div class="fringe">
+                                            {drawn.edge.into_iter().map(|(name, seconds)| view! {
+                                                <div class="far">
+                                                    <span class="far-name">{name}</span>
+                                                    <span class="far-time">
+                                                        {secs_text(seconds)}
+                                                    </span>
+                                                </div>
+                                            }).collect_view()}
+                                        </div>
+                                    })}
+                                }.into_any()
+                            }
+                        }}
+                    </div>
                 </div>
             }
         })}
@@ -1476,7 +1730,8 @@ fn App() -> impl IntoView {
             {move || doc.get().map(|d| match panel.get() {
                 Some(Panel::Scale) => view! {
                     <ScalePanel net=Arc::clone(&d.net) scale=scale y_max=y_max
-                                panel=panel debug=debug />
+                                panel=panel debug=debug
+                                spread=Signal::derive(move || mode.get() == Mode::Spread) />
                 }.into_any(),
                 Some(Panel::Service) => view! {
                     <ServicePanel net=Arc::clone(&d.net) services=services panel=panel />

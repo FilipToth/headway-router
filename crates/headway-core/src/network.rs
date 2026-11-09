@@ -275,6 +275,27 @@ impl Network {
         self.by_cell.get(&cell).copied()
     }
 
+    /// The station nearest a point, if one lies within `within` grid units.
+    ///
+    /// For pointing at a station rather than naming it: a click lands near a
+    /// marker, not on its cell centre, and how near "near" is depends on the
+    /// zoom — which is why the radius is the caller's to say. Ties go to the
+    /// lower id, so the same click always picks the same station.
+    pub fn station_near(&self, (x, y): (f64, f64), within: f64) -> Option<StationId> {
+        if !within.is_finite() || within < 0.0 || !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        let mut found: Option<(StationId, f64)> = None;
+        for station in &self.stations {
+            let (sx, sy) = station.cell.centre();
+            let away = (sx - x).hypot(sy - y);
+            if away <= within && found.is_none_or(|(_, best)| away < best) {
+                found = Some((station.id, away));
+            }
+        }
+        found.map(|(id, _)| id)
+    }
+
     /// A station's name, or a readable stand-in for the unlabelled ones.
     pub fn label(&self, id: StationId) -> String {
         let s = self.station(id);

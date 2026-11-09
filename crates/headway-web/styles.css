@@ -47,6 +47,8 @@ body {
   -webkit-user-select: none;
 }
 .viewport.dragging { cursor: grabbing; }
+/* Travel time mode: the map is a thing you point at, not only drag. */
+.viewport.picking { cursor: crosshair; }
 
 /* The map svg fills the window and is panned/zoomed by its own viewBox, so it
    is never scaled as a bitmap. No transform and no will-change here: both cost
@@ -93,6 +95,39 @@ body {
 .btn-quiet { height: 1.9rem; min-width: 0; font-size: .8rem; background: transparent; border-color: transparent; color: var(--accent); }
 .btn-quiet:hover { background: rgba(127, 127, 160, 0.12); }
 .btn-primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; height: 2.6rem; }
+
+/* Which question the map is answering. Top centre, between the two panels, so
+   neither of them owns it. */
+.switch {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  gap: .15rem;
+  padding: .2rem;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+}
+.seg {
+  padding: .3rem .8rem;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: .8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.seg:hover { color: var(--ink); }
+.seg.on { background: var(--accent); color: var(--accent-ink); }
+.seg:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .topleft {
   position: fixed;
@@ -423,11 +458,66 @@ body {
 .hint.empty { color: var(--muted); cursor: default; }
 .hint.empty:hover { background: transparent; color: var(--muted); }
 
-/* The journey's fade rules ride along with the itinerary, so they come and go
-   with it. The UA stylesheet hides <style>; said out loud here because a
+/* The fade rules ride along with whatever is drawn over the map, so they come
+   and go with it. The UA stylesheet hides <style>; said out loud here because a
    stylesheet in the middle of a flex column is otherwise a surprise. */
-.planner > style {
+.topleft > style {
   display: none;
+}
+
+/* The panel for the mode that is not on. Hidden rather than unmounted, so that
+   a station typed into one is still there on the way back. */
+.hidden { display: none; }
+
+/* ---------- travel time ---------- */
+
+.legend {
+  display: flex;
+  flex-direction: column;
+  gap: .15rem;
+}
+.band {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  font-size: .74rem;
+  font-variant-numeric: tabular-nums;
+}
+.band-ink {
+  flex: none;
+  width: 1.1rem;
+  height: .45rem;
+  border-radius: 2px;
+}
+.band-range { flex: 1; color: var(--muted); }
+.band-count { font-weight: 600; }
+
+/* The furthest few stations inside the limit, which is what an argument about
+   the limit is actually about. */
+.fringe {
+  display: flex;
+  flex-direction: column;
+  gap: .1rem;
+  max-height: 22vh;
+  overflow-y: auto;
+}
+.far {
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+  font-size: .74rem;
+}
+.far-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.far-time {
+  flex: none;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- distance settings ---------- */
@@ -464,7 +554,7 @@ body {
 .row-label { flex: none; font-size: .78rem; font-weight: 600; }
 .row .readout { flex: 1; }
 .row-unit { flex: 1; color: var(--muted); font-size: .68rem; line-height: 1.2; }
-.num.walk { flex: none; width: 3.6rem; }
+.num.walk, .num.mins { flex: none; width: 3.6rem; }
 
 /* The graph is drawn in its own pixel space and scaled to the panel's width,
    so pointer positions are divided back into those units before they are read
@@ -665,3 +755,10 @@ body {
 .chip-swatch { flex: none; width: .5rem; height: .5rem; border-radius: 2px; }
 
 .add { align-self: flex-start; }
+
+/* On a narrow screen the planner is nearly the whole width, so the switch
+   cannot share the top line with it. */
+@media (max-width: 34rem) {
+  .topleft { top: 3.9rem; }
+  .panel { top: 3.9rem; }
+}

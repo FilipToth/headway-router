@@ -173,6 +173,20 @@ in this map are labelled *only* with the tram icon.
    quickest way round each line the best answer leans on — and offers whichever
    replies turn out to be genuinely different journeys, each labelled with the
    question it answers. Nothing on that list is a weighted blend of the others.
+   `reach::Spread` asks the other question a map gets asked — not "how do I get
+   there" but "what is within half an hour of here" — and it is the same search
+   run to exhaustion instead of stopped at a target, so a dot inside the ring is
+   a dot the itinerary would reach in that time. There are no areas to shade on
+   a schematic map, so the frontier is drawn along the track: `Spread::fringe`
+   cuts each stretch where the time runs out, and approaches a segment from
+   both ends, because a point in the middle of one is reached by riding in from
+   whichever station is nearer in time. What "nearer in time" means there is
+   `Spread::departure`, not the arrival time: a junction reached at twelve
+   minutes is twelve minutes from the lines you are already aboard and twelve
+   minutes *plus a change* from every other line through it. Measuring the
+   frontier from the arrival instead gives every line through a junction a free
+   change and draws banded track past stations the limit does not include —
+   which is why the per-line arrivals are kept and not just the best one.
 6. A station can be **drawn twice**, identically. Key stations by cell and merge.
 7. 52 stations carry no label and 2 are labelled only with an icon glyph. They are
    real stations and stay in the graph as interchange/through nodes; they are simply

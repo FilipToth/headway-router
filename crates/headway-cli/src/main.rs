@@ -5,10 +5,12 @@
 //!                       [--profile <units>:<km>,...] [--centre <x>,<y>]
 //!                       [--headway <minutes>] [--walk <seconds>]
 //!                       [--off <category>]...
+//!                       [--reach <station>] [--within <minutes>]
 
 use headway_core::network::{Marker, Shape};
 use headway_core::{
-    fade, options, parse, tag, trace, Choice, Network, Scale, Services, StationId, Timing,
+    fade, options, parse, polyline_length, reach, tag, trace, Choice, Network, Scale, Services,
+    Spread, StationId, Timing,
 };
 use std::process::ExitCode;
 
@@ -19,7 +21,8 @@ fn main() -> ExitCode {
             "usage: headway <map.svg> [--lines] [--stations] [--warnings] [--line <name>] \
              [--route <from> <to>] [--find <query>] [--paint] \
              [--profile <units>:<km>,...] [--centre <x>,<y>] [--headway <minutes>] \
-             [--walk <seconds>] [--off <category>]..."
+             [--walk <seconds>] [--off <category>]... \
+             [--reach <station>] [--within <minutes>]"
         );
         return ExitCode::from(2);
     }
@@ -58,6 +61,23 @@ fn main() -> ExitCode {
             println!("    {}", net.label(id));
         }
         return ExitCode::SUCCESS;
+    }
+
+    if let Some(i) = args.iter().position(|a| a == "--reach") {
+        let Some(from) = args.get(i + 1) else {
+            eprintln!("--reach needs a station name");
+            return ExitCode::from(2);
+        };
+        let minutes = args
+            .iter()
+            .position(|a| a == "--within")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|raw| raw.parse::<f64>().ok())
+            .unwrap_or(30.0);
+        let measure = scale(&net, &args);
+        let services = seeded(&net, &args);
+        let timing = Timing::new(&net, &measure, &services);
+        return reach(&timing, from, minutes, want("--paint"));
     }
 
     if let Some(i) = args.iter().position(|a| a == "--route") {
@@ -341,6 +361,73 @@ fn find(net: &Network, needle: &str) -> Result<StationId, String> {
 fn clock(seconds: f64) -> String {
     let whole = seconds.max(0.0).round() as u64;
     format!("{}:{:02}", whole / 60, whole % 60)
+}
+
+/// What is within `minutes` of one station, which is the isochrone the map
+/// draws banded.
+fn reach(timing: &Timing, from: &str, minutes: f64, paint: bool) -> ExitCode {
+    let net = timing.net();
+    let from = match find(net, from) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let limit = minutes.max(0.0) * 60.0;
+    let spread = Spread::from(timing, from);
+    let stops = spread.stops(net, limit);
+    println!("within {minutes} min of {}", net.label(from));
+    println!(
+        "  {} of {} stations, out of the {} anything reaches at all",
+        stops.len(),
+        net.stations.len(),
+        spread.reached(),
+    );
+
+    // The bands, as the legend in the panel lists them.
+    let counts = spread.counts(limit);
+    for (n, count) in counts.iter().enumerate() {
+        let (low, high) = (
+            limit * n as f64 / reach::BANDS as f64,
+            limit * (n + 1) as f64 / reach::BANDS as f64,
+        );
+        println!(
+            "    {:>6} to {:<6} {:>4} station(s)",
+            clock(low),
+            clock(high),
+            count,
+        );
+    }
+
+    // The furthest handful, which is where a limit is worth arguing about.
+    println!();
+    println!("  last stops inside the limit:");
+    for stop in stops.iter().rev().take(8) {
+        println!(
+            "    {:>7}  band {}  {}",
+            clock(stop.seconds),
+            stop.band + 1,
+            truncate(&net.label(stop.station), 44),
+        );
+    }
+
+    if paint {
+        let fringes = spread.fringe(timing, limit);
+        let drawn = reach::layer(&fringes, &stops, spread.start(net));
+        println!();
+        println!(
+            "  {} stretch(es) of track drawn, {} bytes of layer:",
+            fringes.len(),
+            drawn.len(),
+        );
+        let whole: f64 = fringes.iter().map(|f| polyline_length(&f.points)).sum();
+        println!("  {whole:.1} grid units inside the limit");
+        for piece in drawn.split_inclusive("/>").take(12) {
+            println!("    {piece}");
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn route(

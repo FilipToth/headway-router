@@ -458,8 +458,10 @@ fn search(
 }
 
 /// f64 ordered for the heap. Costs here are always finite.
+///
+/// Shared with [`crate::reach`], which runs the same search to exhaustion.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Order(f64);
+pub(crate) struct Order(pub(crate) f64);
 impl Eq for Order {}
 impl Ord for Order {
     fn cmp(&self, other: &Self) -> Ordering {

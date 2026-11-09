@@ -6,7 +6,8 @@
 
 use headway_core::network::Shape;
 use headway_core::{
-    fade, fastest, options, parse, root_inner_range, trace, Cell, Network, Scale, Services, Timing,
+    fade, fastest, options, parse, reach, root_inner_range, trace, Cell, Network, Scale, Services,
+    Spread, Timing,
 };
 
 fn real_map() -> Option<Network> {
@@ -333,6 +334,58 @@ fn a_fresh_map_sorts_its_lines_by_how_they_are_drawn() {
 }
 
 #[test]
+fn an_isochrone_over_a_real_map_agrees_with_the_itineraries_inside_it() {
+    let net = map_or_skip!();
+    let scale = Scale::for_network(&net);
+    let services = Services::for_network(&net);
+    let timing = Timing::new(&net, &scale, &services);
+    let from = net.station_named("Science Centre").expect("Science Centre is on the map");
+
+    let spread = Spread::from(&timing, from);
+    assert_eq!(spread.seconds(from), Some(0.0));
+    // A central station on a map this size reaches most of it eventually.
+    assert!(spread.reached() * 2 > net.stations.len(), "only {} reached", spread.reached());
+
+    // Every station inside the ring is a station the planner would get to in
+    // that time. One cost model, asked two different ways.
+    let limit = 45.0 * 60.0;
+    let stops = spread.stops(&net, limit);
+    assert!(stops.len() > 1);
+    for stop in stops.iter().step_by(7) {
+        if stop.station == from {
+            continue;
+        }
+        let journey = fastest(&timing, from, stop.station).expect("inside, so routable");
+        assert!(
+            (stop.seconds - journey.seconds).abs() < 1e-6,
+            "{}: isochrone {} s, itinerary {} s",
+            net.label(stop.station),
+            stop.seconds,
+            journey.seconds,
+        );
+        assert_eq!(stop.band, reach::band(stop.seconds, limit));
+    }
+
+    // A tighter limit is a subset of a looser one, station for station.
+    let near: Vec<_> = spread.stops(&net, limit / 3.0).iter().map(|s| s.station).collect();
+    assert!(near.len() < stops.len());
+    for station in &near {
+        assert!(stops.iter().any(|s| s.station == *station), "a ring that is not nested");
+    }
+
+    // And the drawn frontier stays inside the track it is cut from.
+    let fringes = spread.fringe(&timing, limit);
+    assert!(!fringes.is_empty());
+    let drawn: f64 = fringes.iter().map(|f| headway_core::polyline_length(&f.points)).sum();
+    let all: f64 = net.edges.iter().map(|e| e.length).sum();
+    assert!(drawn > 0.0 && drawn < all, "{drawn:.1} units drawn of {all:.1}");
+    let layer = reach::layer(&fringes, &stops, spread.start(&net));
+    assert!(!layer.contains("NaN"));
+    assert_eq!(layer.matches("<path").count(), fringes.len() * 2, "a casing under each band");
+    assert_eq!(layer.matches("<circle").count(), stops.len() + 1, "a dot each, and the ring");
+}
+
+#[test]
 fn a_real_journey_is_offered_more_than_one_way_to_make_it() {
     let net = map_or_skip!();
     let scale = Scale::for_network(&net);
@@ -476,4 +529,52 @@ fn a_real_journey_is_timed_by_the_model_it_was_planned_with() {
         "{kmh:.0} km/h door to door over {km:.1} km in {:.0} s",
         journey.seconds,
     );
+}
+
+#[test]
+fn a_real_frontier_never_runs_past_the_limit_it_is_drawn_for() {
+    // The isochrone's own bug, pinned on a real map: measuring the frontier
+    // from when a passenger *arrives* at a junction rather than from when a
+    // train can leave it hands every other line through that junction a free
+    // change, and draws banded track right up to stations the limit does not
+    // include. At a quarter of an hour this reached eighteen of them.
+    let net = map_or_skip!();
+    let scale = Scale::for_network(&net);
+    let services = Services::for_network(&net);
+    let timing = Timing::new(&net, &scale, &services);
+    let from = net.station_named("Forward Commission").expect("Forward Commission is on the map");
+    let spread = Spread::from(&timing, from);
+
+    for minutes in [15.0, 30.0, 45.0] {
+        let limit = minutes * 60.0;
+        let drawn = spread.fringe(&timing, limit);
+        let inside: Vec<_> = spread.stops(&net, limit).iter().map(|s| s.station).collect();
+        assert!(!drawn.is_empty() && inside.len() > 1, "nothing drawn at {minutes} min");
+
+        for edge in &net.edges {
+            let mut backwards = edge.polyline.clone();
+            backwards.reverse();
+            let whole = drawn
+                .iter()
+                .any(|piece| piece.points == edge.polyline || piece.points == backwards);
+            if !whole {
+                continue;
+            }
+            // A segment drawn end to end says both its stations are inside the
+            // limit, so they had better be.
+            for end in [edge.a, edge.b] {
+                assert!(
+                    inside.contains(&end),
+                    "{minutes} min: track drawn to {}, which takes {:?} s",
+                    net.label(end),
+                    spread.seconds(end),
+                );
+            }
+        }
+
+        // And every stub starts from a point in time the limit covers.
+        for piece in &drawn {
+            assert!(piece.seconds <= limit + 1e-9, "a piece drawn from {} s", piece.seconds);
+        }
+    }
 }
